@@ -1,0 +1,29 @@
+# Use through scripts/bench-docker, which fills in the absolute host paths.
+services:
+  bench:
+    build: .
+    image: inlumen-bench:0.1.0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Same path inside and outside: the host's Docker engine resolves these
+      # paths when ServiceCraft mounts submissions into its own containers.
+      - ${BENCH_DATA_DIR:?set by scripts/bench-docker}:${BENCH_DATA_DIR}
+      - ${BENCH_RUNS_DIR:?set by scripts/bench-docker}:${BENCH_RUNS_DIR}
+      - ${BENCH_CONFIG_DIR:?set by scripts/bench-docker}:/config
+      - bench-cache:/cache
+    environment:
+      INLUMEN_BENCH_DATA_DIR: ${BENCH_DATA_DIR}
+      INLUMEN_BENCH_RUNS_DIR: ${BENCH_RUNS_DIR}
+      # Temporary folders (ours and ServiceCraft's) are mounted into sibling
+      # containers too, so they must live on a host path as well.
+      TMPDIR: ${BENCH_RUNS_DIR}/.tmp
+      # Profiles can name these with --api-key-env; empty when unset on the host.
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    working_dir: ${BENCH_RUNS_DIR}
+    extra_hosts:
+      # Lets Linux hosts reach local model servers (Ollama) like Docker Desktop does.
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  bench-cache:

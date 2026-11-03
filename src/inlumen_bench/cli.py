@@ -1,0 +1,305 @@
+"""`bench` command line."""
+
+from __future__ import annotations
+
+import json
+import tempfile
+from pathlib import Path
+from typing import Optional
+
+import typer
+from rich.console import Console
+from rich.table import Table
+
+from . import __version__
+from .config import config_path, load_config, resolve_data_dir, save_config
+from .corpus import Corpus, CorpusError, fetch, setup
+from .providers import PRESETS, Profile, load_profiles, remove_profile, upsert_profile
+
+app = typer.Typer(no_args_is_help=True, add_completion=False, help="Benchmark pipeline design and code generation on ServiceCraft.")
+datasets_app = typer.Typer(no_args_is_help=True, help="Find, check and fetch datasets.")
+providers_app = typer.Typer(no_args_is_help=True, help="Model endpoint profiles.")
+config_app = typer.Typer(no_args_is_help=True, help="Show or change settings.")
+app.add_typer(datasets_app, name="datasets")
+app.add_typer(providers_app, name="providers")
+app.add_typer(config_app, name="config")
+
+console = Console()
+STATE: dict = {}
+
+
+@app.callback()
+def main(
+    data_dir: Optional[Path] = typer.Option(None, "--data-dir", help="Overrides INLUMEN_BENCH_DATA_DIR and the config file."),
+    runs_dir: Path = typer.Option(Path("runs"), "--runs-dir", envvar="INLUMEN_BENCH_RUNS_DIR", help="Where experiments are written."),
+) -> None:
+    STATE["data_dir"] = resolve_data_dir(data_dir)
+    STATE["runs_dir"] = runs_dir
+
+
+def _corpus() -> Corpus:
+    return Corpus(STATE["data_dir"].path)
+
+
+def _fail(message: str) -> None:
+    console.print(f"[red]{message}[/red]")
+    raise typer.Exit(2)
+
+
+@app.command()
+def version() -> None:
+    console.print(__version__)
+
+
+# ---- config ---------------------------------------------------------------
+
+@config_app.command("show")
+def config_show() -> None:
+    data = STATE["data_dir"]
+    console.print(f"config file: {config_path()}")
+    console.print(f"data folder: {data.path}  [dim](from {data.source})[/dim]")
+    for key, value in load_config().items():
+        console.print(f"  {key} = {value}")
+
+
+@config_app.command("set")
+def config_set(key: str, value: str) -> None:
+    if key not in {"data_dir"}:
+        _fail(f"Unknown setting {key!r}; supported: data_dir")
+    values = load_config()
+    values[key] = value
+    console.print(f"saved {save_config(values)}")
+
+
+# ---- datasets -------------------------------------------------------------
+
+@datasets_app.command("list")
+def datasets_list() -> None:
+    data = STATE["data_dir"]
+    console.print(f"data folder: {data.path}  [dim](from {data.source})[/dim]")
+    corpus = _corpus()
+    if not corpus.exists():
+        console.print("  no datasets (run `bench datasets fetch`)")
+        return
+    meta = corpus.metadata()
+    status = corpus.setup_status()
+    qualified = status["qualified"]
+    console.print(f"  servicecraft  commit {meta.get('commit', '?')[:12]}{' (modified)' if meta.get('dirty') else ''}  "
+                  f"{len(corpus.case_ids())} cases  "
+                  + (f"qualified {qualified['qualified_cases']}/{qualified['case_count']}" if qualified else "not set up"))
+
+
+@datasets_app.command("check")
+def datasets_check() -> None:
+    problems = _corpus().check()
+    if problems:
+        for p in problems[:50]:
+            console.print(f"  [red]✗[/red] {p}")
+        raise typer.Exit(1)
+    console.print("[green]✓[/green] servicecraft dataset is complete and prompts match the manifest")
+
+
+@datasets_app.command("fetch")
+def datasets_fetch(ref: Optional[str] = typer.Option(None, help="Commit or tag to check out.")) -> None:
+    corpus = fetch(STATE["data_dir"].path, ref=ref)
+    console.print(f"fetched servicecraft {corpus.version()} into {corpus.root}")
+
+
+@app.command("setup")
+def setup_cmd(
+    workers: int = typer.Option(3, help="Parallel control qualifications."),
+    rebuild: bool = typer.Option(False, help="Rebuild the Docker images."),
+) -> None:
+    """Evaluator environment, Docker images and local requalification of all controls."""
+    try:
+        summary = setup(_corpus(), workers=workers, rebuild=rebuild, log=lambda m: console.print(f"[dim]{m}[/dim]"))
+    except CorpusError as exc:
+        _fail(str(exc))
+    console.print(f"[green]✓[/green] qualified {summary['qualified_cases']}/{summary['case_count']} cases")
+
+
+# ---- providers ------------------------------------------------------------
+
+@providers_app.command("list")
+def providers_list() -> None:
+    profiles = load_profiles()
+    if not profiles:
+        console.print("no profiles (add one with `bench providers add`)")
+        return
+    table = Table("name", "base url", "api key", "parallel", "timeout", "stall")
+    for p in profiles.values():
+        m = p.masked()
+        key = f"env:{p.api_key_env}" if p.api_key_env else (m["api_key"] or "—")
+        table.add_row(p.name, p.base_url, key, str(p.max_parallel), f"{p.timeout_s:.0f}s", f"{p.stall_s:.0f}s")
+    console.print(table)
+
+
+@providers_app.command("add")
+def providers_add(
+    name: str,
+    preset: str = typer.Option("custom", help=f"One of: {', '.join(PRESETS)}"),
+    base_url: Optional[str] = typer.Option(None),
+    api_key_env: Optional[str] = typer.Option(None, help="Read the key from this environment variable."),
+    ask_key: bool = typer.Option(False, "--ask-key", help="Prompt for the key (stored in the profile file)."),
+    max_parallel: Optional[int] = typer.Option(None),
+    timeout_s: Optional[float] = typer.Option(None),
+    stall_s: Optional[float] = typer.Option(None),
+) -> None:
+    if preset not in PRESETS:
+        _fail(f"Unknown preset {preset!r}")
+    values = {**PRESETS[preset]}
+    for key, value in (("base_url", base_url), ("max_parallel", max_parallel), ("timeout_s", timeout_s), ("stall_s", stall_s)):
+        if value is not None:
+            values[key] = value
+    if not values["base_url"]:
+        _fail("--base-url is required for a custom profile")
+    api_key = typer.prompt("API key", hide_input=True) if ask_key else None
+    path = upsert_profile(Profile(name=name, api_key=api_key, api_key_env=api_key_env, **values))
+    console.print(f"saved profile {name!r} in {path}")
+
+
+@providers_app.command("remove")
+def providers_remove(name: str) -> None:
+    console.print("removed" if remove_profile(name) else f"no profile {name!r}")
+
+
+@providers_app.command("models")
+def providers_models(name: str, contains: Optional[str] = typer.Option(None)) -> None:
+    from .llm import list_models
+
+    models = list_models(load_profiles()[name])
+    for model in models:
+        if not contains or contains.lower() in model.lower():
+            console.print(model)
+
+
+@providers_app.command("test")
+def providers_test(name: str, model: str) -> None:
+    from .llm import ping
+
+    result = ping(load_profiles()[name], model)
+    console.print(f"[green]✓[/green] {result.resolved_model or model} answered {result.text.strip()!r} "
+                  f"in {result.latency_s:.1f}s · usage {result.usage_provenance} · cost {result.cost_usd}")
+
+
+# ---- single-case tools ----------------------------------------------------
+
+@app.command()
+def contract(case: str, track: str = typer.Option("fixed_graph")) -> None:
+    """Print the runtime contract a method receives for a case."""
+    from .contract import render
+
+    corpus = _corpus()
+    text, sha = render(corpus, corpus.resolve_cases([case])[0], track)
+    typer.echo(text)
+    typer.echo(f"sha256 {sha}", err=True)
+
+
+@app.command("validate")
+def validate_cmd(submission: Path, case: str) -> None:
+    """Run the public validator (the feedback methods may see) on a submission."""
+    from .validate import validate
+
+    corpus = _corpus()
+    case_id = corpus.resolve_cases([case])[0]
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace = corpus.export(case_id, Path(tmp) / "ws", "natural_language")
+        report = validate(submission, workspace / "inputs", corpus.prompt(case_id))
+    console.print_json(json.dumps(report.to_dict()))
+
+
+# ---- experiments ----------------------------------------------------------
+
+@app.command()
+def run(
+    name: str,
+    case: list[str] = typer.Option([], "--case", "-c", help="Case ID or number; repeat. Default: all."),
+    method: list[str] = typer.Option(["direct"], "--method", "-m"),
+    model: list[str] = typer.Option([], "--model", help="profile:model; repeat for several."),
+    track: list[str] = typer.Option(["fixed_graph"], "--track", "-t"),
+    reps: int = typer.Option(1, "--reps", "-n"),
+    seed: int = typer.Option(0),
+    max_cost: Optional[float] = typer.Option(None, help="USD per episode."),
+    max_seconds: Optional[float] = typer.Option(None, help="Wall time per episode."),
+    max_requests: Optional[int] = typer.Option(None, help="Model requests per episode."),
+    workers: int = typer.Option(2, help="Episodes in parallel."),
+    resume: bool = typer.Option(False, help="Continue an existing experiment."),
+    evaluate: bool = typer.Option(True, help="Score with ServiceCraft when generation ends."),
+    plain: Optional[bool] = typer.Option(None, "--plain/--rich", help="Force the plain or the bar view."),
+) -> None:
+    """Create (or resume) an experiment and run it."""
+    from .evaluate import evaluate_experiment
+    from .progress import ProgressDisplay
+    from .runner import Experiment, create_experiment, pending_episodes, run_experiment
+
+    corpus = _corpus()
+    root = STATE["runs_dir"] / name
+    if resume:
+        exp = Experiment.load(root)
+    else:
+        if not model:
+            _fail("--model is required")
+        limits = {k: v for k, v in {"max_cost_usd": max_cost, "max_seconds": max_seconds, "max_requests": max_requests}.items() if v is not None}
+        try:
+            exp = create_experiment(root, corpus, name=name, cases=corpus.resolve_cases(case), methods=method,
+                                    models=model, tracks=track, repetitions=reps, seed=seed, limits=limits)
+        except (FileExistsError, ValueError, KeyError, CorpusError) as exc:
+            _fail(str(exc))
+    todo = pending_episodes(root, exp)
+    total = len(exp.episodes())
+    console.print(f"{name}: {total} episodes, {len(todo)} to run → {root}")
+    if todo:
+        with ProgressDisplay(len(todo), name, plain=plain):
+            run_experiment(root, corpus, workers=workers)
+    if evaluate:
+        evaluate_experiment(root, corpus, log=lambda m: console.print(f"[dim]{m}[/dim]"))
+    status(name)
+
+
+@app.command("evaluate")
+def evaluate_cmd(name: str) -> None:
+    """Score generated, not yet evaluated episodes with ServiceCraft."""
+    from .evaluate import evaluate_experiment
+
+    evaluate_experiment(STATE["runs_dir"] / name, _corpus(), log=lambda m: console.print(f"[dim]{m}[/dim]"))
+    status(name)
+
+
+@app.command()
+def status(name: str) -> None:
+    """Results per method, model and track."""
+    from .runner import Experiment, episode_state
+
+    root = STATE["runs_dir"] / name
+    exp = Experiment.load(root)
+    cells: dict[tuple, dict] = {}
+    for ep in exp.episodes():
+        state = episode_state(root / "episodes" / ep["id"]) or {"status": "pending"}
+        cell = cells.setdefault((ep["method"], ep["model"], ep["track"]), {
+            "n": 0, "pending": 0, "gen_failed": 0, "infra": 0, "evaluated": 0,
+            "executable": 0, "success": 0, "cost": 0.0, "cost_missing": 0})
+        cell["n"] += 1
+        s = state["status"]
+        cell["pending"] += s in ("pending", "running", "generated")
+        cell["gen_failed"] += s == "generation_failed"
+        cell["infra"] += s == "infra_error"
+        if s == "evaluated":
+            scores = state.get("scores") or {}
+            cell["evaluated"] += 1
+            cell["executable"] += scores.get("dagster_executable") == 1
+            cell["success"] += scores.get("complete_success") == 1
+        usage = state.get("usage") or {}
+        cell["cost"] += usage.get("cost_usd") or 0
+        cell["cost_missing"] += bool(usage.get("cost_unavailable"))
+    table = Table("method", "model", "track", "episodes", "pending", "gen. failed", "infra", "executable", "complete success", "cost")
+    for (m, mod, tr), c in sorted(cells.items()):
+        done = c["n"] - c["pending"] - c["infra"]
+        rate = lambda k: f"{c[k]}/{done}" if done else "—"
+        cost = f"${c['cost']:.3f}" + (" + ?" if c["cost_missing"] else "")
+        table.add_row(m, mod, tr, str(c["n"]), str(c["pending"]), str(c["gen_failed"]), str(c["infra"]),
+                      rate("executable"), rate("success"), cost)
+    console.print(table)
+
+
+if __name__ == "__main__":
+    app()
