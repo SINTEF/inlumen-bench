@@ -16,6 +16,7 @@ import platformdirs
 APP = "inlumen-bench"
 DATA_DIR_ENV = "INLUMEN_BENCH_DATA_DIR"
 CONFIG_DIR_ENV = "INLUMEN_BENCH_CONFIG_DIR"
+OWNER_ENV = "INLUMEN_BENCH_OWNER"
 
 
 def config_dir() -> Path:
@@ -56,6 +57,7 @@ def save_config(values: dict) -> Path:
     path = config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n")
+    restore_owner(path.parent)
     return path
 
 
@@ -74,3 +76,33 @@ def resolve_data_dir(flag: str | Path | None = None) -> DataDir:
     if configured:
         return DataDir(Path(configured).expanduser().resolve(), "config")
     return DataDir(Path(platformdirs.user_data_dir(APP)) / "datasets", "default")
+
+
+def bench_paths(data_dir: Path, runs_dir: Path | None = None) -> list[Path]:
+    """Everything bench writes: the corpus folders (including renamed old ones), runs and config."""
+    paths = sorted(data_dir.glob("servicecraft*")) if data_dir.is_dir() else []
+    runs = runs_dir or (Path(os.environ["INLUMEN_BENCH_RUNS_DIR"]) if os.environ.get("INLUMEN_BENCH_RUNS_DIR") else None)
+    return paths + ([runs] if runs else []) + [config_dir()]
+
+
+def restore_owner(*paths: Path) -> None:
+    """Gives files back to INLUMEN_BENCH_OWNER (uid:gid) when running as root.
+
+    On a Linux server the container must run as root, because ServiceCraft's evaluator
+    removes files its sandbox containers wrote as uid 65532. This keeps everything it
+    leaves in the user's folders deletable by that user.
+    """
+    owner = os.environ.get(OWNER_ENV)
+    if not owner or os.geteuid() != 0:
+        return
+    uid, gid = (int(x) for x in owner.split(":"))
+    for top in paths:
+        if not top.exists():
+            continue
+        os.lchown(top, uid, gid)
+        for root, dirs, files in os.walk(top):
+            for name in dirs + files:
+                try:
+                    os.lchown(os.path.join(root, name), uid, gid)
+                except FileNotFoundError:
+                    pass

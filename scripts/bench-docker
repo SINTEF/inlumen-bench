@@ -1,37 +1,35 @@
 #!/usr/bin/env bash
-# Runs `bench` inside the Docker image with the host's folders mounted at the
-# same absolute paths. Usage: scripts/bench-docker <bench arguments>
+# Runs one `bench` command inside the Docker image, with the same folders as the
+# dashboard started by `docker compose up`. Usage: scripts/bench-docker <bench arguments>
 #
-# Folders (override with environment variables):
-#   BENCH_DATA_DIR    data folder; default: INLUMEN_BENCH_DATA_DIR, then data_dir
-#                     from the config file, then the same platform default as `bench`
-#   BENCH_RUNS_DIR    experiments; default: ./runs in this repository
-#   BENCH_CONFIG_DIR  config and endpoint profiles; default: ~/.config/inlumen-bench
+# Folders come from the environment, then from .env next to compose.yaml, then defaults:
+#   BENCH_DATA_DIR    datasets (default ~/Documents/Datasets)
+#   BENCH_RUNS_DIR    experiments (default ./runs in this repository)
+#   BENCH_CONFIG_DIR  config and endpoint profiles (default ~/.config/inlumen-bench)
 set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-config_dir="${BENCH_CONFIG_DIR:-${INLUMEN_BENCH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/inlumen-bench}}"
 
-if [[ -z "${BENCH_DATA_DIR:-}" ]]; then
-  if [[ -n "${INLUMEN_BENCH_DATA_DIR:-}" ]]; then
-    BENCH_DATA_DIR="$INLUMEN_BENCH_DATA_DIR"
-  elif [[ -f "$config_dir/config.toml" ]] && grep -q '^data_dir *=' "$config_dir/config.toml"; then
-    BENCH_DATA_DIR="$(sed -n 's/^data_dir *= *"\(.*\)"$/\1/p' "$config_dir/config.toml")"
-  elif [[ "$(uname)" == "Darwin" ]]; then
-    BENCH_DATA_DIR="$HOME/Library/Application Support/inlumen-bench/datasets"
-  else
-    BENCH_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/inlumen-bench/datasets"
-  fi
-fi
-BENCH_DATA_DIR="${BENCH_DATA_DIR/#\~/$HOME}"
+from_env_file() {  # Reads one BENCH_* setting from .env without sourcing the file.
+  [[ -f "$repo/.env" ]] || return 0
+  sed -n "s/^$1=[\"']\{0,1\}\([^\"']*\)[\"']\{0,1\}$/\1/p" "$repo/.env" | tail -n 1
+}
+
+BENCH_DATA_DIR="${BENCH_DATA_DIR:-$(from_env_file BENCH_DATA_DIR)}"
+BENCH_RUNS_DIR="${BENCH_RUNS_DIR:-$(from_env_file BENCH_RUNS_DIR)}"
+BENCH_CONFIG_DIR="${BENCH_CONFIG_DIR:-$(from_env_file BENCH_CONFIG_DIR)}"
+BENCH_DATA_DIR="${BENCH_DATA_DIR:-$HOME/Documents/Datasets}"
 BENCH_RUNS_DIR="${BENCH_RUNS_DIR:-$repo/runs}"
+BENCH_CONFIG_DIR="${BENCH_CONFIG_DIR:-$HOME/.config/inlumen-bench}"
 
-mkdir -p "$BENCH_DATA_DIR" "$BENCH_RUNS_DIR" "$config_dir"
-# Absolute, symlink-free paths: Docker resolves them on the host.
-BENCH_DATA_DIR="$(cd "$BENCH_DATA_DIR" && pwd -P)"
-BENCH_RUNS_DIR="$(cd "$BENCH_RUNS_DIR" && pwd -P)"
-BENCH_CONFIG_DIR="$(cd "$config_dir" && pwd -P)"
-export BENCH_DATA_DIR BENCH_RUNS_DIR BENCH_CONFIG_DIR
+expand() { local p="${1/#\~/$HOME}"; mkdir -p "$p"; (cd "$p" && pwd -P); }
+# Absolute, symlink-free paths: the host's Docker engine resolves them.
+BENCH_DATA_DIR="$(expand "$BENCH_DATA_DIR")"
+BENCH_RUNS_DIR="$(expand "$BENCH_RUNS_DIR")"
+BENCH_CONFIG_DIR="$(expand "$BENCH_CONFIG_DIR")"
 mkdir -p "$BENCH_RUNS_DIR/.tmp"
+export BENCH_DATA_DIR BENCH_RUNS_DIR BENCH_CONFIG_DIR
 
-exec docker compose --progress quiet -f "$repo/compose.yaml" run --rm bench "$@"
+# No -f: compose then reads COMPOSE_FILE from .env (compose.linux.yaml on Linux servers).
+cd "$repo"
+exec docker compose --progress quiet run --rm bench "$@"

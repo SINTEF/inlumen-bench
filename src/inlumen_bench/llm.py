@@ -192,10 +192,13 @@ class LLMClient:
                     if data.get("usage"):
                         usage = data["usage"]
                     for choice in data.get("choices") or []:
-                        delta = (choice.get("delta") or {}).get("content") or ""
+                        message = choice.get("delta") or {}
+                        delta = message.get("content") or ""
                         if delta:
                             chunks.append(delta)
                             received_chars += len(delta)
+                        # Thinking models stream reasoning first; it is progress, not reply text.
+                        received_chars += len(message.get("reasoning") or message.get("reasoning_content") or "")
                         finish_reason = choice.get("finish_reason") or finish_reason
                     now = time.monotonic()
                     if now - last_progress >= PROGRESS_INTERVAL_S:
@@ -285,5 +288,6 @@ def ping(profile: Profile, model: str) -> ChatResult:
     return client.chat(
         [{"role": "user", "content": "Reply with the single word: ok"}],
         purpose="ping",
-        max_tokens=16,
+        # Room for thinking models, which reason before they answer.
+        max_tokens=2048,
     )

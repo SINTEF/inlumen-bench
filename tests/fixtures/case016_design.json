@@ -1,0 +1,143 @@
+{
+ "title": "Player-style clustering with convergent features and multiview diagnostics",
+ "tasks": [
+  {
+   "id": "validate",
+   "name": "Validate players",
+   "operation": "source_validation",
+   "inputs": [
+    "input:data.csv"
+   ],
+   "outputs": [
+    "players_clean.csv"
+   ],
+   "requirements": [
+    "Validate IDs, binary target, and required values."
+   ],
+   "parameters": {}
+  },
+  {
+   "id": "performance",
+   "name": "Derive performance features",
+   "operation": "feature_engineering",
+   "inputs": [
+    "players_clean.csv"
+   ],
+   "outputs": [
+    "performance_features.csv"
+   ],
+   "requirements": [
+    "Compute production and retain modeling measures."
+   ],
+   "parameters": {}
+  },
+  {
+   "id": "context_features",
+   "name": "Derive context features",
+   "operation": "feature_engineering",
+   "inputs": [
+    "players_clean.csv"
+   ],
+   "outputs": [
+    "context_features.csv"
+   ],
+   "requirements": [
+    "Compute availability and retain context."
+   ],
+   "parameters": {}
+  },
+  {
+   "id": "integrate",
+   "name": "Integrate player features",
+   "operation": "feature_join",
+   "inputs": [
+    "performance_features.csv",
+    "context_features.csv"
+   ],
+   "outputs": [
+    "model_features.csv"
+   ],
+   "requirements": [
+    "Join one-to-one on player ID."
+   ],
+   "parameters": {}
+  },
+  {
+   "id": "cluster",
+   "name": "Cluster player styles",
+   "operation": "kmeans_clustering",
+   "inputs": [
+    "model_features.csv"
+   ],
+   "outputs": [
+    "cluster_assignments.csv"
+   ],
+   "requirements": [
+    "Use fixed scaling, KMeans, and canonical labels."
+   ],
+   "parameters": {}
+  },
+  {
+   "id": "profiles",
+   "name": "Profile clusters",
+   "operation": "grouped_aggregation",
+   "inputs": [
+    "cluster_assignments.csv"
+   ],
+   "outputs": [
+    "cluster_profiles.csv"
+   ],
+   "requirements": [
+    "Aggregate six cluster measures."
+   ],
+   "parameters": {}
+  },
+  {
+   "id": "teams",
+   "name": "Summarize team composition",
+   "operation": "grouped_aggregation",
+   "inputs": [
+    "cluster_assignments.csv"
+   ],
+   "outputs": [
+    "team_cluster_mix.csv"
+   ],
+   "requirements": [
+    "Compute counts and within-team shares."
+   ],
+   "parameters": {}
+  },
+  {
+   "id": "allstars",
+   "name": "Summarize cluster All-Star rates",
+   "operation": "grouped_aggregation",
+   "inputs": [
+    "cluster_assignments.csv"
+   ],
+   "outputs": [
+    "cluster_allstar_rates.csv"
+   ],
+   "requirements": [
+    "Compute counts and rates."
+   ],
+   "parameters": {}
+  },
+  {
+   "id": "report",
+   "name": "Reconcile cluster views",
+   "operation": "multi_input_report",
+   "inputs": [
+    "cluster_profiles.csv",
+    "team_cluster_mix.csv",
+    "cluster_allstar_rates.csv"
+   ],
+   "outputs": [
+    "cluster_report.json"
+   ],
+   "requirements": [
+    "Reconcile player totals and publish counts."
+   ],
+   "parameters": {}
+  }
+ ]
+}

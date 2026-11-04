@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import atexit
 import json
+import os
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -12,8 +14,8 @@ from rich.console import Console
 from rich.table import Table
 
 from . import __version__
-from .config import config_path, load_config, resolve_data_dir, save_config
-from .corpus import Corpus, CorpusError, fetch, setup
+from .config import bench_paths, config_path, load_config, resolve_data_dir, restore_owner, save_config
+from .corpus import Corpus, CorpusError, ensure_images, fetch, setup
 from .providers import PRESETS, Profile, load_profiles, remove_profile, upsert_profile
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="Benchmark pipeline design and code generation on ServiceCraft.")
@@ -34,7 +36,13 @@ def main(
     runs_dir: Path = typer.Option(Path("runs"), "--runs-dir", envvar="INLUMEN_BENCH_RUNS_DIR", help="Where experiments are written."),
 ) -> None:
     STATE["data_dir"] = resolve_data_dir(data_dir)
+    STATE["data_dir_flag"] = data_dir
     STATE["runs_dir"] = runs_dir
+    # tempfile silently falls back to /tmp when TMPDIR is missing, which breaks
+    # Docker bind mounts in the container setup; create it up front.
+    if os.environ.get("TMPDIR"):
+        Path(os.environ["TMPDIR"]).mkdir(parents=True, exist_ok=True)
+    atexit.register(lambda: restore_owner(*bench_paths(STATE["data_dir"].path, runs_dir.resolve())))
 
 
 def _corpus() -> Corpus:
@@ -299,6 +307,35 @@ def status(name: str) -> None:
         table.add_row(m, mod, tr, str(c["n"]), str(c["pending"]), str(c["gen_failed"]), str(c["infra"]),
                       rate("executable"), rate("success"), cost)
     console.print(table)
+
+
+@app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", help="Keep on localhost: the dashboard has no login."),
+    port: int = typer.Option(8000),
+) -> None:
+    """Start the Streamlit dashboard."""
+    import sys
+
+    app_path = Path(__file__).parent / "dashboard" / "app.py"
+    runs = STATE["runs_dir"].resolve()
+    runs.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, "INLUMEN_BENCH_RUNS_DIR": str(runs)}
+    if STATE["data_dir_flag"]:
+        env["INLUMEN_BENCH_DATA_DIR"] = str(STATE["data_dir"].path)
+    corpus = _corpus()
+    if corpus.setup_status()["qualified"]:
+        try:
+            ensure_images(corpus, log=lambda m: console.print(f"[dim]{m}[/dim]"))
+        except Exception as exc:  # The dashboard shows the image state; don't block startup.
+            console.print(f"[yellow]evaluator images: {exc}[/yellow]")
+    console.print(f"dashboard on http://localhost:{port}")
+    args = [sys.executable, "-m", "streamlit", "run", str(app_path),
+            "--server.address", host, "--server.port", str(port), "--server.headless", "true",
+            "--server.fileWatcherType", "none", "--browser.gatherUsageStats", "false",
+            "--client.toolbarMode", "minimal", "--theme.primaryColor", "#2f6fb3"]
+    # Replace this process, so signals (Ctrl-C, docker stop) reach Streamlit directly.
+    os.execve(sys.executable, args, env)
 
 
 if __name__ == "__main__":

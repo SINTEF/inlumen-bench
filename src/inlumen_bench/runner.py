@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from . import __version__
+from . import design_score
 from .budget import Budget, BudgetExceeded, Limits
 from .contract import CONTRACT_VERSION, render
 from .corpus import TRACKS, Corpus
@@ -46,6 +47,7 @@ class Experiment:
     repetitions: int
     seed: int = 0
     limits: dict = field(default_factory=dict)
+    method_options: dict = field(default_factory=dict)  # method name → options
     dataset: dict = field(default_factory=dict)
     contract_version: str = CONTRACT_VERSION
     bench_version: str = __version__
@@ -176,12 +178,20 @@ def run_episode(root: Path, corpus: Corpus, exp: Experiment, ep: dict, profiles,
             llm=LLMClient(profile, ref.model, events, budget),
             events=events,
             budget=budget,
+            asset_names=(corpus.case_info(ep["case_id"])["logical_to_asset"]
+                         if ep["track"] == "fixed_graph" else {}),
+            options=exp.method_options.get(ep["method"], {}),
         )
         ctx.work_dir.mkdir()
         result = method.generate(ctx)
         events.emit("phase_finished", phase=phase)
         state.update(status=result.status, error=result.error, checkpoints=result.checkpoints,
                      counters=result.counters)
+        design_file = ctx.work_dir / "design.json"
+        if design_file.is_file() and ep["track"] == "natural_language":
+            # Operator-side scoring against the private reference graph, after generation.
+            reference = json.loads((corpus.root / "corpus/pipelines" / ep["case_id"] / "task_graph.json").read_text())
+            state["design_score"] = design_score.score(json.loads(design_file.read_text()), reference)
     except BudgetExceeded as exc:
         state.update(status="generation_failed", error=f"budget: {exc}", failed_phase=phase)
     except LLMError as exc:

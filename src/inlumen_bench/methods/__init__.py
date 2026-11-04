@@ -2,8 +2,9 @@
 
 from .base import EpisodeContext, Method, MethodResult
 from .direct import Direct
+from .inlumen import Inlumen
 
-METHODS: dict[str, type[Method]] = {Direct.name: Direct}
+METHODS: dict[str, type[Method]] = {Direct.name: Direct, Inlumen.name: Inlumen}
 
 
 def get_method(name: str) -> Method:

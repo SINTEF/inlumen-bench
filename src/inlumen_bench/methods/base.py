@@ -39,10 +39,17 @@ class EpisodeContext:
     llm: LLMClient
     events: EventLog
     budget: Budget
+    # Fixed-graph track: task ID → asset name required by the contract.
+    asset_names: dict[str, str] = field(default_factory=dict)
+    options: dict = field(default_factory=dict)
 
     @property
     def prompt(self) -> str:
         return (self.workspace / "prompt.txt").read_text()
+
+    @property
+    def input_files(self) -> list[str]:
+        return sorted(p.name for p in (self.workspace / "inputs").iterdir() if p.is_file())
 
     @property
     def provided_graph(self) -> str | None:
@@ -56,6 +63,10 @@ class MethodResult:
     error: str | None = None
     checkpoints: list[dict] = field(default_factory=list)
     counters: dict = field(default_factory=dict)
+
+
+class InfraError(Exception):
+    """The method's own tooling failed (validator, Docker); the episode is not scored."""
 
 
 class Method:
