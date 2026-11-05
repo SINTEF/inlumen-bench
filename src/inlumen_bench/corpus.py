@@ -167,8 +167,18 @@ class Corpus:
             "qualified": None,
         }
         setup_file = self.qualified_root / "setup.json"
+        registry_file = self.qualified_corpus / "registry.json"
         if setup_file.is_file():
             status["qualified"] = json.loads(setup_file.read_text())
+        elif registry_file.is_file():
+            # A qualified corpus placed in the data folder by hand or by an older run.
+            registry = json.loads(registry_file.read_text())
+            qualified = registry.get("qualified_cases")
+            status["qualified"] = {
+                "qualified_cases": len(qualified) if isinstance(qualified, list) else qualified,
+                "case_count": registry.get("case_count"),
+                "finished_at": datetime.fromtimestamp(registry_file.stat().st_mtime, UTC).isoformat(timespec="seconds"),
+            }
         return status
 
     # ---- generation workspace ------------------------------------------
@@ -241,14 +251,7 @@ def setup(corpus: Corpus, *, workers: int = 3, rebuild: bool = False, log=print)
             subprocess.run([str(corpus.tool_python), "-m", "pip", "install", "--quiet", *TOOL_REQUIREMENTS], check=True)
 
     evaluation = corpus.root / "evaluation"
-    for image, dockerfile in ((RUNTIME_IMAGE, "Dockerfile"), (ORACLE_IMAGE, "Dockerfile.oracles")):
-        if rebuild or not _image_id(image):
-            log(f"building {image}")
-            subprocess.run(
-                ["docker", "build", "--quiet", "-t", image, "-f", str(evaluation / dockerfile), str(evaluation)],
-                check=True,
-                stdout=subprocess.DEVNULL,
-            )
+    _build_images(corpus, rebuild, log)
 
     out = corpus.qualified_root
     if out.exists():
@@ -278,7 +281,59 @@ def setup(corpus: Corpus, *, workers: int = 3, rebuild: bool = False, log=print)
         "finished_at": datetime.now(UTC).isoformat(timespec="seconds"),
     }
     (out / "setup.json").write_text(json.dumps(summary, indent=2) + "\n")
+    _keep_images(log)
     return summary
+
+
+IMAGES = ((RUNTIME_IMAGE, "Dockerfile"), (ORACLE_IMAGE, "Dockerfile.oracles"))
+KEEP_ENV = "INLUMEN_BENCH_KEEP_IMAGES"
+
+
+def _build_images(corpus: Corpus, rebuild: bool, log) -> None:
+    evaluation = corpus.root / "evaluation"
+    for image, dockerfile in IMAGES:
+        if rebuild or not _image_id(image):
+            log(f"building {image}")
+            subprocess.run(
+                ["docker", "build", "--quiet", "-t", image, "-f", str(evaluation / dockerfile), str(evaluation)],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+
+
+def ensure_images(corpus: Corpus, log=print) -> None:
+    """Rebuilds evaluator images that disappeared and checks they are the qualified ones.
+
+    Some servers delete unused images on their own (a Kubernetes kubelet does when the
+    disk is over 85% full). A rebuild from Docker's build cache gives the same image ID;
+    a different ID means the qualified corpus no longer matches and setup must run again.
+    """
+    status = corpus.setup_status()
+    _build_images(corpus, False, log)
+    pinned = (status["qualified"] or {}).get("images") or {}
+    changed = [img for img, image_id in pinned.items() if image_id and _image_id(img) != image_id]
+    if changed:
+        raise CorpusError(f"{', '.join(changed)} changed since setup; run `bench setup` again")
+    _keep_images(log)
+
+
+def _keep_images(log) -> None:
+    """With INLUMEN_BENCH_KEEP_IMAGES set, keeps one idle container per evaluator image,
+    so automatic image cleanup sees the images as in use."""
+    if not os.environ.get(KEEP_ENV):
+        return
+    for image, _ in IMAGES:
+        name = "inlumen-bench-keep-" + image.split(":")[0]
+        image_id = _image_id(image)
+        current = subprocess.run(["docker", "container", "inspect", "--format", "{{.Image}}", name],
+                                 capture_output=True, text=True).stdout.strip()
+        if current == image_id:
+            continue
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+        log(f"keeping {image} in use with container {name}")
+        subprocess.run(["docker", "run", "-d", "--name", name, "--restart", "unless-stopped", "--network", "none",
+                        "--memory", "32m", "--entrypoint", "sleep", image, "infinity"],
+                       check=True, capture_output=True)
 
 
 def _git(repo: Path, *args: str) -> str:

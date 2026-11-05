@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import atexit
 import json
+import os
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -12,8 +14,8 @@ from rich.console import Console
 from rich.table import Table
 
 from . import __version__
-from .config import config_path, load_config, resolve_data_dir, save_config
-from .corpus import Corpus, CorpusError, fetch, setup
+from .config import bench_paths, config_path, load_config, resolve_data_dir, restore_owner, save_config
+from .corpus import Corpus, CorpusError, ensure_images, fetch, setup
 from .providers import PRESETS, Profile, load_profiles, remove_profile, upsert_profile
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="Benchmark pipeline design and code generation on ServiceCraft.")
@@ -34,7 +36,13 @@ def main(
     runs_dir: Path = typer.Option(Path("runs"), "--runs-dir", envvar="INLUMEN_BENCH_RUNS_DIR", help="Where experiments are written."),
 ) -> None:
     STATE["data_dir"] = resolve_data_dir(data_dir)
+    STATE["data_dir_flag"] = data_dir
     STATE["runs_dir"] = runs_dir
+    # tempfile silently falls back to /tmp when TMPDIR is missing, which breaks
+    # Docker bind mounts in the container setup; create it up front.
+    if os.environ.get("TMPDIR"):
+        Path(os.environ["TMPDIR"]).mkdir(parents=True, exist_ok=True)
+    atexit.register(lambda: restore_owner(*bench_paths(STATE["data_dir"].path, runs_dir.resolve())))
 
 
 def _corpus() -> Corpus:
@@ -213,10 +221,15 @@ def validate_cmd(submission: Path, case: str) -> None:
 @app.command()
 def run(
     name: str,
+    step: str = typer.Option("code", "--step", "-s", help="design (step 1) or code (step 2)."),
+    design_from: str = typer.Option(
+        "reference", "--design-from", "-d",
+        help="Step 2: `reference` (ServiceCraft's graphs) or the name of a design experiment."),
+    design_model: list[str] = typer.Option(
+        [], "--design-model", help="Step 2 from a design experiment: only its designs by these models."),
     case: list[str] = typer.Option([], "--case", "-c", help="Case ID or number; repeat. Default: all."),
-    method: list[str] = typer.Option(["direct"], "--method", "-m"),
+    method: list[str] = typer.Option(["inlumen"], "--method", "-m", help="Step 2: inlumen and/or direct."),
     model: list[str] = typer.Option([], "--model", help="profile:model; repeat for several."),
-    track: list[str] = typer.Option(["fixed_graph"], "--track", "-t"),
     reps: int = typer.Option(1, "--reps", "-n"),
     seed: int = typer.Option(0),
     max_cost: Optional[float] = typer.Option(None, help="USD per episode."),
@@ -224,10 +237,10 @@ def run(
     max_requests: Optional[int] = typer.Option(None, help="Model requests per episode."),
     workers: int = typer.Option(2, help="Episodes in parallel."),
     resume: bool = typer.Option(False, help="Continue an existing experiment."),
-    evaluate: bool = typer.Option(True, help="Score with ServiceCraft when generation ends."),
+    evaluate: bool = typer.Option(True, help="Step 2: score with ServiceCraft when generation ends."),
     plain: Optional[bool] = typer.Option(None, "--plain/--rich", help="Force the plain or the bar view."),
 ) -> None:
-    """Create (or resume) an experiment and run it."""
+    """Create (or resume) an experiment and run it: `--step design`, then `--step code`."""
     from .evaluate import evaluate_experiment
     from .progress import ProgressDisplay
     from .runner import Experiment, create_experiment, pending_episodes, run_experiment
@@ -241,17 +254,19 @@ def run(
             _fail("--model is required")
         limits = {k: v for k, v in {"max_cost_usd": max_cost, "max_seconds": max_seconds, "max_requests": max_requests}.items() if v is not None}
         try:
-            exp = create_experiment(root, corpus, name=name, cases=corpus.resolve_cases(case), methods=method,
-                                    models=model, tracks=track, repetitions=reps, seed=seed, limits=limits)
+            exp = create_experiment(root, corpus, stage=step, design_from=design_from,
+                                    design_models=design_model or None, name=name,
+                                    cases=corpus.resolve_cases(case) if case or design_from == "reference" else [],
+                                    methods=method, models=model, repetitions=reps, seed=seed, limits=limits)
         except (FileExistsError, ValueError, KeyError, CorpusError) as exc:
             _fail(str(exc))
     todo = pending_episodes(root, exp)
     total = len(exp.episodes())
-    console.print(f"{name}: {total} episodes, {len(todo)} to run → {root}")
+    console.print(f"{name} ({exp.stage}, {exp.design_source}): {total} episodes, {len(todo)} to run → {root}")
     if todo:
         with ProgressDisplay(len(todo), name, plain=plain):
             run_experiment(root, corpus, workers=workers)
-    if evaluate:
+    if evaluate and exp.stage == "code":
         evaluate_experiment(root, corpus, log=lambda m: console.print(f"[dim]{m}[/dim]"))
     status(name)
 
@@ -265,40 +280,94 @@ def evaluate_cmd(name: str) -> None:
     status(name)
 
 
+@app.command("list")
+def list_cmd() -> None:
+    """Experiments in the runs folder, newest first."""
+    from .runner import Experiment
+
+    runs = STATE["runs_dir"]
+    paths = sorted(runs.glob("*/experiment.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    table = Table("name", "step", "designs", "models", "cases", "episodes", "created")
+    for path in paths:
+        exp = Experiment.load(path.parent)
+        table.add_row(exp.name, exp.stage, exp.design_source, ", ".join(exp.models), str(len(exp.cases)),
+                      str(len(exp.episodes())), exp.created_at.replace("T", " ")[:16])
+    console.print(table)
+
+
+@app.command()
+def delete(name: str, yes: bool = typer.Option(False, "--yes", "-y", help="Don't ask for confirmation.")) -> None:
+    """Delete an experiment and everything in its folder."""
+    from .runner import delete_experiment, dependents
+
+    root = STATE["runs_dir"] / name
+    if not (root / "experiment.json").is_file():
+        _fail(f"No experiment named {name!r} in {STATE['runs_dir']}")
+    users = dependents(STATE["runs_dir"], name)
+    if users:
+        console.print(f"[yellow]Code experiments built on its designs can't be resumed afterwards: "
+                      f"{', '.join(users)}[/yellow]")
+    if not yes and not typer.confirm(f"Delete {root} and all its episodes?"):
+        raise typer.Abort()
+    delete_experiment(root)
+    console.print(f"deleted {name}")
+
+
 @app.command()
 def status(name: str) -> None:
-    """Results per method, model and track."""
-    from .runner import Experiment, episode_state
+    """Results per method, model and design source."""
+    from .results import summarize
+    from .runner import Experiment
 
     root = STATE["runs_dir"] / name
     exp = Experiment.load(root)
-    cells: dict[tuple, dict] = {}
-    for ep in exp.episodes():
-        state = episode_state(root / "episodes" / ep["id"]) or {"status": "pending"}
-        cell = cells.setdefault((ep["method"], ep["model"], ep["track"]), {
-            "n": 0, "pending": 0, "gen_failed": 0, "infra": 0, "evaluated": 0,
-            "executable": 0, "success": 0, "cost": 0.0, "cost_missing": 0})
-        cell["n"] += 1
-        s = state["status"]
-        cell["pending"] += s in ("pending", "running", "generated")
-        cell["gen_failed"] += s == "generation_failed"
-        cell["infra"] += s == "infra_error"
-        if s == "evaluated":
-            scores = state.get("scores") or {}
-            cell["evaluated"] += 1
-            cell["executable"] += scores.get("dagster_executable") == 1
-            cell["success"] += scores.get("complete_success") == 1
-        usage = state.get("usage") or {}
-        cell["cost"] += usage.get("cost_usd") or 0
-        cell["cost_missing"] += bool(usage.get("cost_unavailable"))
-    table = Table("method", "model", "track", "episodes", "pending", "gen. failed", "infra", "executable", "complete success", "cost")
-    for (m, mod, tr), c in sorted(cells.items()):
-        done = c["n"] - c["pending"] - c["infra"]
-        rate = lambda k: f"{c[k]}/{done}" if done else "—"
-        cost = f"${c['cost']:.3f}" + (" + ?" if c["cost_missing"] else "")
-        table.add_row(m, mod, tr, str(c["n"]), str(c["pending"]), str(c["gen_failed"]), str(c["infra"]),
-                      rate("executable"), rate("success"), cost)
+    rate = lambda c, k: "—" if c.get(k) is None else f"{c[k] * 100:.0f}%"
+    cost = lambda c: f"${c['cost_usd']:.3f}" + (" + ?" if c["cost_incomplete"] else "")
+    if exp.stage == "design":
+        table = Table("model", "episodes", "pending", "failed", "infra", "valid design", "artifact coverage",
+                      "task recall", "dependency recall", "design correct", "cost")
+        for c in summarize(root):
+            table.add_row(c["model"], str(c["episodes"]), str(c["pending"]), str(c["generation_failed"]),
+                          str(c["infra"]), rate(c, "valid_design"), rate(c, "design_artifact_coverage"),
+                          rate(c, "design_task_recall"), rate(c, "design_dependency_recall"),
+                          rate(c, "design_design_correct"), cost(c))
+    else:
+        table = Table("method", "model", "design", "episodes", "pending", "gen. failed", "infra", "executable",
+                      "complete success", "cost")
+        for c in summarize(root):
+            table.add_row(c["method"], c["model"], str(c["design"]), str(c["episodes"]), str(c["pending"]),
+                          str(c["generation_failed"]), str(c["infra"]), rate(c, "dagster_executable"),
+                          rate(c, "complete_success"), cost(c))
     console.print(table)
+
+
+@app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", help="Keep on localhost: the dashboard has no login."),
+    port: int = typer.Option(8000),
+) -> None:
+    """Start the Streamlit dashboard."""
+    import sys
+
+    app_path = Path(__file__).parent / "dashboard" / "app.py"
+    runs = STATE["runs_dir"].resolve()
+    runs.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, "INLUMEN_BENCH_RUNS_DIR": str(runs)}
+    if STATE["data_dir_flag"]:
+        env["INLUMEN_BENCH_DATA_DIR"] = str(STATE["data_dir"].path)
+    corpus = _corpus()
+    if corpus.setup_status()["qualified"]:
+        try:
+            ensure_images(corpus, log=lambda m: console.print(f"[dim]{m}[/dim]"))
+        except Exception as exc:  # The dashboard shows the image state; don't block startup.
+            console.print(f"[yellow]evaluator images: {exc}[/yellow]")
+    console.print(f"dashboard on http://localhost:{port}")
+    args = [sys.executable, "-m", "streamlit", "run", str(app_path),
+            "--server.address", host, "--server.port", str(port), "--server.headless", "true",
+            "--server.fileWatcherType", "none", "--browser.gatherUsageStats", "false",
+            "--client.toolbarMode", "minimal", "--theme.primaryColor", "#2f6fb3"]
+    # Replace this process, so signals (Ctrl-C, docker stop) reach Streamlit directly.
+    os.execve(sys.executable, args, env)
 
 
 if __name__ == "__main__":

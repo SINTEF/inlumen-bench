@@ -8,24 +8,31 @@ Controls come from the locally requalified corpus, so their images exist here.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import time
 from pathlib import Path
 
-from .corpus import Corpus, CorpusError
+from .corpus import Corpus, CorpusError, ensure_images
 from .events import EventLog
 from .runner import Experiment, _write_state, episode_state
 
 POLL_S = 2.0
 
 
+def entry_id(episode_id: str) -> str:
+    """ServiceCraft accepts only [A-Za-z0-9_-] in entry IDs; model names often have dots."""
+    return re.sub(r"[^A-Za-z0-9_-]", "_", episode_id)
+
+
 def evaluate_experiment(root: Path, corpus: Corpus, log=print) -> Path | None:
     exp = Experiment.load(root)
+    ensure_images(corpus, log)
     registry = corpus.registry(qualified=True)
     cases = {c["case_id"]: c for c in registry["cases"]}
     qroot = corpus.qualified_corpus
 
-    entries, controls, waiting = [], {}, []
+    entries, controls, waiting, by_entry = [], {}, [], {}
     for ep in exp.episodes():
         ep_dir = root / "episodes" / ep["id"]
         state = episode_state(ep_dir)
@@ -42,8 +49,12 @@ def evaluate_experiment(root: Path, corpus: Corpus, log=print) -> Path | None:
             "inputs": str(case_dir / "inputs"),
             "spec": str(qroot / case["evaluation_spec"]),
         }
+        eid = entry_id(ep["id"])
+        if eid in by_entry:
+            raise CorpusError(f"episodes {by_entry[eid]} and {ep['id']} map to the same evaluator ID {eid}")
+        by_entry[eid] = ep["id"]
         entries.append({
-            "id": ep["id"],
+            "id": eid,
             "control": control_id,
             "candidate": str(ep_dir / "submission"),
             "inputs": str(case_dir / "inputs"),
@@ -94,7 +105,8 @@ def evaluate_experiment(root: Path, corpus: Corpus, log=print) -> Path | None:
     if results.is_file():
         for line in results.read_text().splitlines():
             row = json.loads(line)
-            rows[row.get("id") or row.get("entry_id")] = row
+            eid = row.get("id") or row.get("entry_id")
+            rows[by_entry.get(eid, eid)] = row
     for ep_dir in waiting:
         state = episode_state(ep_dir)
         row = rows.get(ep_dir.name)

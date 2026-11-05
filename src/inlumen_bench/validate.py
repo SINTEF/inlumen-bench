@@ -10,6 +10,7 @@ in the public prompt) were not written.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -34,6 +35,8 @@ class PublicReport:
     edges: list[list[str]] = field(default_factory=list)
     written: list[str] = field(default_factory=list)
     missing_artifacts: list[str] = field(default_factory=list)
+    # Tracebacks captured by bench_runtime, per failing asset (harness-based methods only).
+    node_errors: dict[str, str] = field(default_factory=dict)
     elapsed_s: float = 0.0
 
     def to_dict(self) -> dict:
@@ -47,6 +50,8 @@ class PublicReport:
         parts += [e[-ERROR_TAIL:] for e in self.errors]
         if self.missing_artifacts:
             parts.append("Mandatory artifacts not written: " + ", ".join(self.missing_artifacts))
+        for asset, trace in self.node_errors.items():
+            parts.append(f"Traceback in asset `{asset}`:\n{trace[-ERROR_TAIL:]}")
         return "\n\n".join(parts)
 
 
@@ -125,14 +130,17 @@ def _run(submission, inputs, prompt, work, emit, start, timeout_s, memory, cpus,
         (outputs, "/outputs", False),
         (evidence, "/evidence", False),
     ]
+    experiment = os.environ.get("INLUMEN_BENCH_EXPERIMENT")
     args = [
         "docker", "run", "--rm", f"--name={name}",
+        *([f"--label=inlumen-bench.experiment={experiment}"] if experiment else []),
         "--network=none", "--read-only", "--user=65532:65532", "--cap-drop=ALL",
         "--security-opt=no-new-privileges", "--pids-limit=128",
         f"--memory={memory}", f"--cpus={cpus}", "--tmpfs=/tmp:rw,nosuid,size=512m", "--workdir=/tmp",
     ]
     for host, target, ro in mounts:
         args += ["--mount", f"type=bind,source={host},target={target}" + (",readonly" if ro else "")]
+    args += ["--env", "BENCH_DIAGNOSTICS_DIR=/evidence/diag"]
     args += [image, "python", "/opt/evaluator/runtime_worker.py"]
 
     emit("validation_progress", message="load + run in Docker")
@@ -169,6 +177,9 @@ def _run(submission, inputs, prompt, work, emit, start, timeout_s, memory, cpus,
         if not check.get("passed"):
             report.errors.append(f"asset check {check['asset']}.{check['name']} failed")
 
+    diag = evidence / "diag"
+    if diag.is_dir():
+        report.node_errors = {f.stem: f.read_text() for f in sorted(diag.glob("*.txt"))}
     report.written = sorted(p.name for p in outputs.iterdir() if p.is_file())
     report.missing_artifacts = [a for a in mandatory_artifacts(prompt) if a not in report.written]
     if execution.get("status") != "pass" or report.errors:

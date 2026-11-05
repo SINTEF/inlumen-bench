@@ -66,7 +66,10 @@ class ProgressTracker:
         kind = e["type"]
         with self.lock:
             if kind == "episode_started":
-                self.active[eid] = EpisodeView(eid, e.get("group", ""))
+                view = EpisodeView(eid, e.get("group", ""))
+                # Monotonic time is system-wide, so replayed events keep their real start.
+                view.started = e.get("mono", view.started)
+                self.active[eid] = view
                 self.changes.append(f"start  {eid}")
                 return
             view = self.active.get(eid)
@@ -74,7 +77,7 @@ class ProgressTracker:
                 if view:
                     self.durations.setdefault(view.group, []).append(time.monotonic() - view.started)
                     del self.active[eid]
-                if e.get("status") in ("generated", "evaluated"):
+                if e.get("status") in ("generated", "evaluated", "designed"):
                     self.done += 1
                 else:
                     self.failed += 1
