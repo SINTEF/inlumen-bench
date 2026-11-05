@@ -1,15 +1,25 @@
 # inlumen-bench
 
-A generation driver and dashboard for benchmarking pipeline design and code
-generation on the [ServiceCraft](https://github.com/aliduabubakari/servicecraft)
-corpus in two steps, pipeline design and then code generation, across cases,
-models and repetitions. It records
-telemetry for every model request, and scores submissions with ServiceCraft's
-own evaluator. The `inlumen` method runs inLUMEN's own design and code generation
-agents from the [`inlumen-agents`](https://pypi.org/project/inlumen-agents/) package
-on PyPI (see [Installing inLUMEN's agents](#installing-inlumens-agents));
-pipeline designs are exported as inLUMEN Project JSON so they can be opened with
-inLUMEN's Import button.
+A driver and dashboard for benchmarking **pipeline construction** on the
+[ServiceCraft](https://github.com/aliduabubakari/servicecraft) corpus, across cases,
+models, experimental conditions and replicates. Pipeline construction has three phases:
+1. **Pipeline composition**: the task's requirements become a *composition graph*
+   (components, Sources and Destinations, dependencies and bindings).
+2. **Pipeline implementation**: the composition graph becomes *code artifacts*,
+   bundled for Dagster.
+3. **Pipeline execution**: ServiceCraft's own evaluator runs the bundle in Dagster
+   and checks its outputs.
+
+The `inlumen` method runs inLUMEN's own composition and implementation agents from
+the [`inlumen-agents`](https://pypi.org/project/inlumen-agents/) package on PyPI (see
+[Installing inLUMEN's agents](#installing-inlumens-agents)); `direct` is the baseline.
+Every model request is recorded, and everything the research questions need is
+stored per run (see [What is recorded](#what-is-recorded)) and can be exported as
+one CSV row per run. Composition graphs are exported as inLUMEN Project JSON, which
+opens with inLUMEN's Import button.
+
+Terms: a **run** is one case × method × model × condition × replicate (its folder is
+still called an *episode*); an **experiment** is a set of runs of one phase.
 
 ## Quick start with Docker
 Only Docker is needed on the host.
@@ -19,18 +29,23 @@ docker compose up -d          # dashboard on http://localhost:8000 (builds the i
 The dashboard is a [Streamlit](https://streamlit.io) app (`src/inlumen_bench/dashboard/app.py`).
 In the dashboard:
 1. **Corpus**: the dataset in the data folder is found automatically (or fetched with
-   one click). The Cases tab lists the 100 cases; select one to see its prompt,
-   pipeline graph, tasks and input data, or download it as inLUMEN Project JSON. The
-   Evaluator tab prepares ServiceCraft's evaluator once per machine (about 7 minutes).
+   one click). The Cases tab lists the 100 cases with their complexity; select one to
+   see its requirements, reference composition, components and inputs, or download it
+   as inLUMEN Project JSON. The Evaluator tab prepares ServiceCraft's evaluator once
+   per machine (about 7 minutes).
 2. **Models**: add an endpoint (OpenRouter, Ollama, any OpenAI-compatible URL) and test it.
-3. **Launch**: choose the step.
-   - **1 · Pipeline design**: models turn prompts into task graphs, checked and
-     compared with the reference graph. Nothing runs in Docker.
-   - **2 · Code generation**: models write Dagster code for a design, and
-     ServiceCraft scores it. The design is the reference graph or one from a step 1
-     experiment ("Generate code" on a design experiment opens this with its designs).
-4. **Experiments**: live progress, results, and every episode's design graph,
-   files, scores and Project JSON. Delete an experiment from its Delete menu.
+3. **Launch**, in numbered steps: the phase, the compositions and methods
+   (implementation), the support mechanisms to compare (each one on, off, or both),
+   models, cases, replicates and limits. The page shows how many runs that makes
+   before you start.
+4. **Experiments**: select one experiment to open it, or several to stop, export or
+   delete them together. An experiment shows live progress and three tabs: results for
+   its research question (composition, RQ1, or implementation and execution, RQ2),
+   cost and time (RQ3, also by complexity), and its runs. In the runs table, select
+   one run to see its composition (with the reference next to it), implementation
+   attempts, execution, cost and files, or several runs to delete them (they become
+   pending and run again on Resume). "Implement these compositions" on a composition
+   experiment starts phase 2 from its valid compositions.
 
 The same can be done from the command line with `scripts/bench-docker`, which takes
 the same arguments as `bench` (see below):
@@ -39,7 +54,7 @@ scripts/bench-docker datasets fetch
 scripts/bench-docker setup
 scripts/bench-docker run pilot -c 016 --model openrouter:<model-id> -m inlumen -m direct -n 3
 ```
-After changing the code, rebuild with `docker compose build` (or `docker build -t inlumen-bench:0.2.0 .`).
+After changing the code, rebuild with `docker compose build` (or `docker build -t inlumen-bench:0.3.0 .`).
 
 ### Docker settings
 Put these in a `.env` file next to `compose.yaml` (all optional):
@@ -151,7 +166,8 @@ Step 1 (design) uses `inlumen`. Step 2 (code) compares `inlumen` and `direct` (a
    wiring in `definitions.py` and `bench_inlumen_runtime.py`). Public validation runs
    once and is only recorded: repairs are inLUMEN's own.
    Options (`method_options.inlumen`): `sandbox` (`docker` or `none`),
-   `repair_attempts` (default 2), `max_tool_iterations` (design, default 30).
+   `repair_attempts` (default 2), `max_tool_iterations` (design, default 30), and the
+   switches `grounded` and `artifact_contracts` (see [Experimental conditions](#experimental-conditions)).
 
 `inlumen-standalone` in detail:
 1. **Design** (step 1). The prompt becomes a task graph shaped like ServiceCraft's
@@ -169,33 +185,99 @@ Step 1 (design) uses `inlumen`. Step 2 (code) compares `inlumen` and `direct` (a
    image. A failure is traced to an asset, and only that asset is regenerated with
    the error (up to `max_repairs`, default 3). Private checks are never shown.
 
-## Steps
-- **Design** (`--step design`): the prompt only. Scored by the design scores
-  below; a design is *valid* when it passes the structural check.
-- **Code** (`--step code`), with `--design-from`:
-  - `reference`: the method gets ServiceCraft's reviewed graph and the asset names
-    the evaluator expects (the former `fixed_graph` track). Measures code generation.
-  - a design experiment: the method gets that experiment's valid designs (frozen
-    when the code experiment is created). Measures the whole chain. ServiceCraft's
-    graph check needs the reference asset names, which a generated design doesn't
-    have, so `complete_success` is rare here; the other stages are still scored.
+## Phases
+- **Composition** (`--step design`): the requirements only. A composition is *valid*
+  when it passes the structural check; it is then compared with the reference.
+- **Implementation** (`--step code`), with `--design-from`:
+  - `reference`: the method gets ServiceCraft's reviewed composition and the component
+    names the evaluator expects. Measures implementation on a correct composition (RQ2).
+  - a composition experiment: the method gets that experiment's valid compositions
+    (frozen when the implementation experiment is created). Measures the whole chain.
+    ServiceCraft's graph check needs the reference component names, which a generated
+    composition doesn't have, so `complete_success` is rare here; the other stages
+    are still scored.
 
-Experiments made before the two steps load as code experiments; their
-`natural_language` episodes did design and code in one go.
+Experiments made before the two phases load as implementation experiments; their
+`natural_language` runs composed and implemented in one go.
 
-## Scores
-- **ServiceCraft stages** (per episode): submission, static, definition graph,
-  execution, output contracts, behavioural oracle; `complete_success` needs all six.
-- **Design scores** (step 1, provisional): generated tasks are
-  matched to the reference graph by the artifacts they write (the prompt names
-  every mandatory artifact). Reported: artifact coverage, task recall, one-to-one
-  matches, split/merged tasks, dependency recall, extra dependencies and an
-  overall `design_correct`. Labelled provisional until ServiceCraft has a reviewed
-  mapping procedure.
-- **Per method × model × design source**: rates over finished episodes (generation
-  failures count as failures; pending and infrastructure errors are left out),
-  mean ± std of the success rate across repetitions, pass@1 and pass@k, cost,
-  cost per success, tokens and median generation time.
+## Experimental conditions
+The support mechanisms of the `inlumen` method can be switched off for the ablation
+study. An experiment holds the full factorial of the chosen levels, and every
+condition runs on the same cases, models and replicates (the `direct` baseline runs
+once, without conditions):
+
+| Mechanism | Phase | Off means |
+| --- | --- | --- |
+| Metamodel-grounded composition (`--grounding`) | composition | One plain request for the composition graph as JSON, instead of inLUMEN's design agent (tools checked against inLUMEN's metamodel, validation, one repair round). The naming pass and the structural check are the same. |
+| Contract-bounded generation (`--contracts`) | implementation | Components and dependencies without declared output artifacts (generic port names); the requirements still name the mandatory outputs. |
+| Iterative repair loop (`--repair`, `--repairs N`) | implementation | The first attempt is final. With repair on, failed validation is fed back for up to N attempts. |
+
+Each takes `on`, `off` or `both`. For example, the implementation ablation with three
+models and five replicates on all cases:
+```sh
+bench run rq2 --step code --design-from reference -m inlumen -m direct \
+  --contracts both --repair both --repairs 2 -n 5 \
+  --model openrouter:<large> --model openrouter:<medium> --model ollama:<small>
+```
+
+## What is recorded
+Every run's `episode.json` holds the condition and every measure, and
+`bench export` (or "Download runs (CSV)" in the dashboard) writes them as one row per
+run. Failed runs are kept and counted everywhere, including costs.
+
+**Conditions and complexity (all RQs)**: method, model, replicate, condition (with
+each mechanism's setting and the maximum repair attempts), limits, and the
+composition source. Complexity is measured on the *reference* composition, so a
+generated composition with missing components can't make a case look simpler:
+components, dependencies, inputs, outputs, longest dependency chain, maximum fan-in
+and fan-out, branching points, topology, and a level (low ≤ 4 components, medium 5–6,
+high ≥ 7).
+
+**RQ1, composition**:
+- the composition graph (`work/inlumen-graph.json`, `work/project.json`,
+  `work/design.json`) and its summary: components by type, Sources, Destinations,
+  dependencies with their ports, and bindings (parameter values, attached files);
+- comparison with the reference composition (provisional, components matched by the
+  outputs they write): outputs covered, components found and one-to-one, split and
+  merged components, dependencies and bindings found, and the lists of missing and
+  extra components, dependencies and bindings;
+- the composition operation trace (`work/composition-trace.json`): every tool call of
+  the design agent with its arguments and result, and whether the validation repair
+  round ran;
+- manual review: the dashboard draws a seeded random sample of compositions and
+  records a verdict per run (`review.json`).
+
+**RQ2, implementation and execution**:
+- every implementation request and reply (`work/implementation/`), the contracts
+  plan (each component's input and output contracts), the final Task packages with
+  their manifests, dependency declarations and validation reports (`work/packages/`),
+  and the Dagster bundle (`submission/`);
+- the attempt trace (`work/implementation/trace.json`): per attempt its outcome, the
+  validation failures, and those fed back to the model; attempts, first passing
+  attempt, whether repair recovered the run, and the final failure reason. Failures
+  are sorted into categories (contract, syntax, dependency, sandbox, deployment,
+  runtime, format, budget, provider);
+- bundling and public validation, timed apart from generation and repair;
+- execution: whether Dagster loaded and completed the pipeline, which components
+  failed, which outputs were produced, how many passed their contract (schema) and
+  matched the reference, and ServiceCraft's six stages.
+
+Rates reported: valid at the first attempt and at the end, and the share of initially
+failing runs recovered by repair (from the method's own validation, which runs the
+pipeline on sample inputs); executable, valid outputs, expected outputs and complete
+success (from ServiceCraft). The condition without repair gives ServiceCraft's
+first-attempt rates directly.
+
+**RQ3, cost**: input and output tokens and cost of every request (failed ones and
+repairs included), split by phase (composition, implementation, repair); wall time
+per phase (composition, implementation, repair, bundle, validation) and their sum as
+construction time; Dagster execution time apart. Reported per cell: cost and tokens
+per run and per success, median construction and execution time, and the same by
+complexity level. The baseline's exact input is saved (`work/request-0.json`).
+
+**Per cell** (method × model × compositions × condition): rates over finished runs
+(generation failures count as failures; pending runs and infrastructure errors are
+left out), mean ± std of the success rate across replicates, pass@1 and pass@k.
 
 ## Models
 Any OpenAI-compatible endpoint; the API key is optional.
@@ -211,26 +293,29 @@ Keys are never written into run folders or returned by the dashboard.
 
 ## Experiments from the command line
 ```sh
-# Step 1: designs
-bench run designs-1 --step design -c 016 -c 001 \
+# Phase 1: compositions (grounded and ungrounded)
+bench run designs-1 --step design -c 016 -c 001 --grounding both \
   --model openrouter:<model-id> --model ollama:qwen3:32b-16k -n 3
-# Step 2: code from the reference designs, or from step 1
+# Phase 2: implementation of the reference compositions, or of phase 1's
 bench run code-ref --step code --design-from reference -c 016 -c 001 -m inlumen -m direct \
   --model ollama:qwen3-coder -n 3 --max-cost 2 --max-seconds 1800
 bench run code-1 --step code --design-from designs-1 --design-model ollama:qwen3:32b-16k \
   -m inlumen -m direct --model ollama:qwen3-coder
 bench run code-1 --resume     # continue after a crash or Ctrl-C
-bench evaluate code-1         # score anything generated but not yet evaluated
+bench evaluate code-1         # execute and score anything implemented but not yet scored
 bench status code-1
 bench list                    # all experiments
-bench delete code-1           # remove an experiment folder (asks first; -y to skip)
+bench export -o runs.csv      # one row per run of every experiment (or name some; .jsonl too)
+bench recompute               # recompute measures of existing runs (e.g. made by bench < 0.3)
+bench delete code-1 code-2    # remove experiment folders (asks first; -y to skip)
 ```
 An interactive terminal shows progress bars; otherwise progress is written as
 plain log lines. Experiments started from the CLI also appear in the dashboard.
 
-Each episode folder holds the exported workspace (all the method saw), the
-runtime contract it received, the submission, raw responses, `events.jsonl`
-(progress and request telemetry) and `episode.json`.
+Each run folder (`episodes/<run>/`) holds the exported workspace (all the method
+saw), the runtime contract it received, the submission, the traces and raw
+responses in `work/`, `events.jsonl` (progress and request telemetry) and
+`episode.json`.
 
 ## Other commands
 ```sh

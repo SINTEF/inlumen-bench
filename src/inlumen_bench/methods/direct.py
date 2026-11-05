@@ -30,21 +30,37 @@ class Direct(Method):
             {"role": "system", "content": SYSTEM},
             {"role": "user", "content": "\n\n".join(user)},
         ]
+        # Exactly what the baseline receives, for the matched comparison (RQ3).
+        (ctx.work_dir / "request-0.json").write_text(json.dumps(messages, indent=1))
+        details = ctx.details
+        details["conditions"] = {"phase": "implementation", "baseline": True, "repair": False,
+                                 "max_repair_attempts": 0, "retries_allowed": 0,
+                                 "receives": "requirements, composition graph and runtime contract"}
+        ctx.events.emit("phase_started", phase="codegen")
         ctx.events.emit("stage_started", stage="one-shot generation")
         result = ctx.llm.chat(messages, purpose="generate_bundle")
         (ctx.work_dir / "response-0.md").write_text(result.text)
 
         files = parse_bundle(result.text)
+        usage = result.usage or {}
+        attempt = {"attempts": 1, "repairs": 0, "first_passing_attempt": None, "initial_valid": None,
+                   "final_valid": None, "recovered_by_repair": False,
+                   "input_tokens": usage.get("input_tokens"), "output_tokens": usage.get("output_tokens")}
         if "definitions.py" not in files:
+            details["implementation"] = {**attempt, "final_failure_reason": "response contained no definitions.py",
+                                         "final_failure_category": "format"}
             return MethodResult(
                 "generation_failed",
                 error="response contained no definitions.py",
                 counters={"model_requests": 1, "code_producing_requests": 1},
+                details=details,
             )
+        details["implementation"] = attempt
         checkpoint = write_bundle(files, ctx.submission_dir)
         ctx.events.emit("checkpoint", kind="final", sha256=checkpoint, files=sorted(files))
         return MethodResult(
             "generated",
             checkpoints=[{"kind": "final", "sha256": checkpoint}],
             counters={"model_requests": 1, "code_producing_requests": 1, "repairs": 0},
+            details=details,
         )

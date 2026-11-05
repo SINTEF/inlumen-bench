@@ -236,6 +236,10 @@ def run(
     max_seconds: Optional[float] = typer.Option(None, help="Wall time per episode."),
     max_requests: Optional[int] = typer.Option(None, help="Model requests per episode."),
     workers: int = typer.Option(2, help="Episodes in parallel."),
+    grounding: str = typer.Option("on", help="Composition: metamodel grounding on, off or both (ablation)."),
+    contracts: str = typer.Option("on", help="Implementation: explicit artifact contracts on, off or both."),
+    repair: str = typer.Option("on", help="Implementation: the repair loop on, off or both."),
+    repairs: int = typer.Option(2, help="Implementation: maximum repair attempts when repair is on."),
     resume: bool = typer.Option(False, help="Continue an existing experiment."),
     evaluate: bool = typer.Option(True, help="Step 2: score with ServiceCraft when generation ends."),
     plain: Optional[bool] = typer.Option(None, "--plain/--rich", help="Force the plain or the bar view."),
@@ -243,7 +247,7 @@ def run(
     """Create (or resume) an experiment and run it: `--step design`, then `--step code`."""
     from .evaluate import evaluate_experiment
     from .progress import ProgressDisplay
-    from .runner import Experiment, create_experiment, pending_episodes, run_experiment
+    from .runner import Experiment, create_experiment, make_conditions, pending_episodes, run_experiment
 
     corpus = _corpus()
     root = STATE["runs_dir"] / name
@@ -253,11 +257,19 @@ def run(
         if not model:
             _fail("--model is required")
         limits = {k: v for k, v in {"max_cost_usd": max_cost, "max_seconds": max_seconds, "max_requests": max_requests}.items() if v is not None}
+        levels = {"on": (True,), "off": (False,), "both": (True, False)}
+        for flag, value in (("--grounding", grounding), ("--contracts", contracts), ("--repair", repair)):
+            if value not in levels:
+                _fail(f"{flag} takes on, off or both")
+        conditions = make_conditions(step, grounding=levels[grounding], contracts=levels[contracts],
+                                     repair=levels[repair], repairs=repairs)
         try:
             exp = create_experiment(root, corpus, stage=step, design_from=design_from,
                                     design_models=design_model or None, name=name,
                                     cases=corpus.resolve_cases(case) if case or design_from == "reference" else [],
-                                    methods=method, models=model, repetitions=reps, seed=seed, limits=limits)
+                                    methods=method, models=model, repetitions=reps, seed=seed, limits=limits,
+                                    conditions=conditions,
+                                    method_options={"inlumen": {"repair_attempts": repairs}} if step == "code" else {})
         except (FileExistsError, ValueError, KeyError, CorpusError) as exc:
             _fail(str(exc))
     todo = pending_episodes(root, exp)
@@ -296,21 +308,51 @@ def list_cmd() -> None:
 
 
 @app.command()
-def delete(name: str, yes: bool = typer.Option(False, "--yes", "-y", help="Don't ask for confirmation.")) -> None:
-    """Delete an experiment and everything in its folder."""
+def delete(names: list[str] = typer.Argument(..., help="One or more experiments."),
+           yes: bool = typer.Option(False, "--yes", "-y", help="Don't ask for confirmation.")) -> None:
+    """Delete experiments and everything in their folders."""
     from .runner import delete_experiment, dependents
 
-    root = STATE["runs_dir"] / name
-    if not (root / "experiment.json").is_file():
-        _fail(f"No experiment named {name!r} in {STATE['runs_dir']}")
-    users = dependents(STATE["runs_dir"], name)
+    roots = [STATE["runs_dir"] / name for name in names]
+    for name, root in zip(names, roots):
+        if not (root / "experiment.json").is_file():
+            _fail(f"No experiment named {name!r} in {STATE['runs_dir']}")
+    users = sorted({u for name in names for u in dependents(STATE["runs_dir"], name)} - set(names))
     if users:
-        console.print(f"[yellow]Code experiments built on its designs can't be resumed afterwards: "
-                      f"{', '.join(users)}[/yellow]")
-    if not yes and not typer.confirm(f"Delete {root} and all its episodes?"):
+        console.print(f"[yellow]Implementation experiments built on their compositions can't be resumed "
+                      f"afterwards: {', '.join(users)}[/yellow]")
+    if not yes and not typer.confirm(f"Delete {', '.join(names)} with all their runs?"):
         raise typer.Abort()
-    delete_experiment(root)
-    console.print(f"deleted {name}")
+    for name, root in zip(names, roots):
+        delete_experiment(root)
+        console.print(f"deleted {name}")
+
+
+@app.command("recompute")
+def recompute_cmd(names: list[str] = typer.Argument(None, help="Experiments; default: all.")) -> None:
+    """Recompute every run's measures from its files (e.g. for runs made by an older bench)."""
+    from .runner import recompute
+
+    runs = STATE["runs_dir"]
+    roots = [runs / n for n in names] if names else sorted(p.parent for p in runs.glob("*/experiment.json"))
+    corpus = _corpus()
+    for root in roots:
+        console.print(f"{root.name}: {recompute(root, corpus)} runs updated")
+
+
+@app.command()
+def export(names: list[str] = typer.Argument(None, help="Experiments; default: all."),
+           output: Path = typer.Option(Path("runs.csv"), "--output", "-o", help=".csv or .jsonl"),
+           ) -> None:
+    """One row per run with conditions, complexity and every RQ1–RQ3 measure."""
+    from .results import export_rows, to_csv, to_jsonl
+
+    runs = STATE["runs_dir"]
+    roots = ([runs / n for n in names] if names
+             else sorted(p.parent for p in runs.glob("*/experiment.json")))
+    rows = export_rows(roots)
+    output.write_text(to_jsonl(rows) if output.suffix == ".jsonl" else to_csv(rows))
+    console.print(f"{len(rows)} runs from {len(roots)} experiments → {output}")
 
 
 @app.command()
@@ -324,20 +366,21 @@ def status(name: str) -> None:
     rate = lambda c, k: "—" if c.get(k) is None else f"{c[k] * 100:.0f}%"
     cost = lambda c: f"${c['cost_usd']:.3f}" + (" + ?" if c["cost_incomplete"] else "")
     if exp.stage == "design":
-        table = Table("model", "episodes", "pending", "failed", "infra", "valid design", "artifact coverage",
-                      "task recall", "dependency recall", "design correct", "cost")
+        table = Table("model", "condition", "runs", "pending", "failed", "infra", "valid", "components found",
+                      "dependencies found", "bindings found", "correct", "cost")
         for c in summarize(root):
-            table.add_row(c["model"], str(c["episodes"]), str(c["pending"]), str(c["generation_failed"]),
-                          str(c["infra"]), rate(c, "valid_design"), rate(c, "design_artifact_coverage"),
+            table.add_row(c["model"], c["condition"], str(c["episodes"]), str(c["pending"]),
+                          str(c["generation_failed"]), str(c["infra"]), rate(c, "valid_design"),
                           rate(c, "design_task_recall"), rate(c, "design_dependency_recall"),
-                          rate(c, "design_design_correct"), cost(c))
+                          rate(c, "design_binding_recall"), rate(c, "design_design_correct"), cost(c))
     else:
-        table = Table("method", "model", "design", "episodes", "pending", "gen. failed", "infra", "executable",
-                      "complete success", "cost")
+        table = Table("method", "model", "compositions", "condition", "runs", "pending", "failed", "infra",
+                      "first valid", "final valid", "executable", "complete success", "cost")
         for c in summarize(root):
-            table.add_row(c["method"], c["model"], str(c["design"]), str(c["episodes"]), str(c["pending"]),
-                          str(c["generation_failed"]), str(c["infra"]), rate(c, "dagster_executable"),
-                          rate(c, "complete_success"), cost(c))
+            table.add_row(c["method"], c["model"], str(c["design"]), c["condition"], str(c["episodes"]),
+                          str(c["pending"]), str(c["generation_failed"]), str(c["infra"]), rate(c, "initial_valid"),
+                          rate(c, "final_valid"), rate(c, "dagster_executable"), rate(c, "complete_success"), cost(c))
+    console.print(f"{name}: {'pipeline composition' if exp.stage == 'design' else 'pipeline implementation'}")
     console.print(table)
 
 

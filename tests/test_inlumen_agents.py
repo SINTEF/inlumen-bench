@@ -243,3 +243,102 @@ def test_an_unusable_model_reply_is_a_generation_failure(tmp_path):
 
     result = get_method("inlumen").generate(_ctx(tmp_path, Garbled(), design=DESIGN))
     assert result.status == "generation_failed" and "invalid JSON" in result.error
+
+
+class BrokenFirst(FakeLLM):
+    """The first generation has a syntax error; the repair returns a valid draft."""
+
+    def chat(self, messages, purpose="", max_tokens=None):
+        reply = super().chat(messages, purpose, max_tokens)
+        if purpose == "generate_canonical_pipeline":
+            payload = json.loads(reply.text)
+            payload["pipeline_py"] = "def broken(:\n"
+            reply = SimpleNamespace(**{**vars(reply), "text": json.dumps(payload)})
+        return reply
+
+
+def test_the_attempt_trace_records_what_repair_fed_back(tmp_path, monkeypatch):
+    monkeypatch.setattr(adapter, "validate", lambda *a, **k: PublicReport("pass", "done"))
+    ctx = _ctx(tmp_path, BrokenFirst(), design=DESIGN)
+    result = get_method("inlumen").generate(ctx)
+
+    assert result.status == "generated", result.error
+    impl = result.details["implementation"]
+    assert (impl["attempts"], impl["repairs"], impl["first_passing_attempt"]) == (2, 1, 2)
+    assert not impl["initial_valid"] and impl["final_valid"] and impl["recovered_by_repair"]
+    assert impl["feedback_categories"].get("syntax", 0) >= 1 and impl["bundle_seconds"] >= 0
+    trace = json.loads((ctx.work_dir / "implementation/trace.json").read_text())
+    first, second = trace["attempts"]
+    assert first["outcome"] == "invalid" and any("syntax" in e for e in first["errors"])
+    assert second["kind"] == "repair" and second["fed_back"] == first["errors"] and second["outcome"] == "valid"
+    files = sorted(p.name for p in (ctx.work_dir / "implementation").iterdir())
+    assert "contracts-plan.json" in files and "02-repair_canonical_pipeline.request.json" in files
+    assert result.details["conditions"] == {
+        "phase": "implementation", "artifact_contracts": True, "repair": True, "max_repair_attempts": 2,
+        "sandbox": "none", "validation": "static"}
+
+
+def test_without_repair_the_first_attempt_is_final(tmp_path, monkeypatch):
+    monkeypatch.setattr(adapter, "validate", lambda *a, **k: PublicReport("pass", "done"))
+    result = get_method("inlumen").generate(_ctx(tmp_path, BrokenFirst(), design=DESIGN,
+                                                 options={"repair_attempts": 0}))
+    impl = result.details["implementation"]
+    assert result.status == "generation_failed" and impl["attempts"] == 1 and not impl["final_valid"]
+    assert impl["final_failure_category"] == "syntax" and result.details["conditions"]["repair"] is False
+
+
+def test_without_contracts_no_output_artifacts_are_declared(tmp_path, monkeypatch):
+    graph = canvas_graph(DESIGN, {"clean": "clean", "join": "join"}, contracts=False)
+    join = next(n["data"] for n in graph["nodes"] if n["id"] == "join")
+    assert "implementation" not in join and [p["name"] for p in join["ports"]["outputs"]] == ["output 1", "output 2"]
+    monkeypatch.setattr(adapter, "validate", lambda *a, **k: PublicReport("pass", "done"))
+    result = get_method("inlumen").generate(_ctx(tmp_path, FakeLLM(), design=DESIGN,
+                                                 options={"artifact_contracts": False}))
+    assert result.details["conditions"]["artifact_contracts"] is False
+    assert result.details["implementation"]["attempts"] >= 1
+
+
+def test_the_design_agent_operations_are_traced(tmp_path, monkeypatch):
+    prompt = "Clean the orders.\n\n5. Mandatory output artifacts\n- `clean.csv`\n"
+    llm = FakeLLM(naming=[{"sources": {"1": ["orders.csv", "rates.csv"]}, "tasks": {"2": ["clean.csv"]}}])
+    ctx = _ctx(tmp_path, llm)
+    (ctx.workspace / "prompt.txt").write_text(prompt)
+    monkeypatch.setattr(adapter.Inlumen, "design_model", lambda self, ctx: _design_model())
+    result = get_method("inlumen").design(ctx)
+
+    assert result.status == "designed", result.error
+    trace = json.loads((ctx.work_dir / "composition-trace.json").read_text())
+    assert [t["tool"] for t in trace] == ["create_step"] * 3
+    assert all("result" in t and t["is_error"] is False for t in trace)
+    summary = result.details["composition_trace"]
+    assert summary["operations"] == 3 and summary["by_tool"] == {"create_step": 3} and summary["accepted"]
+    assert result.details["conditions"]["grounded"] is True
+
+
+def test_an_ungrounded_composition_is_one_plain_request(tmp_path):
+    prompt = "Clean the orders.\n\n5. Mandatory output artifacts\n- `clean.csv`\n"
+
+    class Composer(FakeLLM):
+        def chat(self, messages, purpose="", max_tokens=None):
+            if purpose == "composition":
+                self.purposes.append(purpose)
+                reply = {"steps": [{"id": "src", "type": "source", "label": "Orders"},
+                                   {"id": "clean", "type": "task", "label": "Clean orders"},
+                                   {"id": "out", "type": "destination", "label": "Table"}],
+                         "dependencies": [{"source": "src", "target": "clean"},
+                                          {"source": "clean", "target": "out"}]}
+                return SimpleNamespace(text="```json\n" + json.dumps(reply) + "\n```", usage=None,
+                                       cost_usd=None, finish_reason="stop")
+            return super().chat(messages, purpose, max_tokens)
+
+    llm = Composer(naming=[{"sources": {"src": ["orders.csv", "rates.csv"]}, "tasks": {"clean": ["clean.csv"]}}])
+    ctx = _ctx(tmp_path, llm, options={"grounded": False})
+    (ctx.workspace / "prompt.txt").write_text(prompt)
+    result = get_method("inlumen").design(ctx)
+
+    assert result.status == "designed", result.error
+    assert llm.purposes == ["composition", "naming"]
+    assert result.details["conditions"]["grounded"] is False
+    graph = json.loads((ctx.work_dir / "inlumen-graph.json").read_text())
+    assert [n["data"]["type"] for n in graph["nodes"]] == ["source", "task", "destination"]
+    assert json.loads((ctx.work_dir / "project.json").read_text())["schema_version"] == "inlumen.project@2"

@@ -37,6 +37,15 @@ def score(design: dict, reference: dict) -> dict:
     mapped_gen_edges = {(s, d) for s, d in gen_edges if s in gen_to_ref and d in gen_to_ref}
     extra = {(s, d) for s, d in mapped_gen_edges if (gen_to_ref[s], gen_to_ref[d]) not in ref_edges}
 
+    # Bindings: which input file each component reads (Source → component), compared
+    # for reference components that map one-to-one.
+    ref_bindings = {(t["id"], i) for t in reference["tasks"] for i in t.get("inputs", []) if i.startswith("input:")}
+    gen_inputs = {t["id"]: {i for i in t.get("inputs", []) if i.startswith("input:")}
+                  for t in design.get("tasks", [])}
+    found_bindings = {(r, i) for r, i in ref_bindings if r in one_to_one and i in gen_inputs[one_to_one[r]]}
+    extra_bindings = sorted(f"{gen_to_ref[g]}<-{i.split(':', 1)[1]}" for g, items in gen_inputs.items()
+                            if g in gen_to_ref for i in items if (gen_to_ref[g], i) not in ref_bindings)
+
     ref_artifacts = set().union(*ref_outputs.values()) if ref_outputs else set()
     gen_artifacts = set().union(*gen_outputs.values()) if gen_outputs else set()
     n_ref, n_gen = len(ref_outputs), len(gen_outputs)
@@ -54,6 +63,12 @@ def score(design: dict, reference: dict) -> dict:
         "dependency_recall": _ratio(len(found), len(ref_edges)),
         "dependency_extra": len(extra),
         "missing_dependencies": sorted(f"{s}->{d}" for s, d in ref_edges - found),
+        "extra_dependencies": sorted(f"{gen_to_ref[s]}->{gen_to_ref[d]}" for s, d in extra),
+        "missing_components": sorted(r for r, gs in ref_to_gen.items() if not gs),
+        "missing_artifacts": sorted(ref_artifacts - gen_artifacts),
+        "binding_recall": _ratio(len(found_bindings), len(ref_bindings)),
+        "missing_bindings": sorted(f"{r}<-{i.split(':', 1)[1]}" for r, i in ref_bindings - found_bindings),
+        "extra_bindings": extra_bindings,
     }
     result["design_correct"] = int(
         len(one_to_one) == n_ref == n_gen and len(found) == len(ref_edges) and not extra

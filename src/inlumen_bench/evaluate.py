@@ -15,7 +15,8 @@ from pathlib import Path
 
 from .corpus import Corpus, CorpusError, ensure_images
 from .events import EventLog
-from .runner import Experiment, _write_state, episode_state
+from .metrics import execution_summary
+from .runner import Experiment, _write_state, episode_state, record_usage
 
 POLL_S = 2.0
 
@@ -114,13 +115,18 @@ def evaluate_experiment(root: Path, corpus: Corpus, log=print) -> Path | None:
             continue
         (ep_dir / "evaluation.json").write_text(json.dumps(row, indent=2) + "\n")
         # Blocked or infrastructure results stay "generated" so the next call retries them.
+        report = batch / "output" / row["report"] if row.get("report") else None
         state.update(evaluation_batch=batch.name, scores=row.get("scores"),
                      stages=row.get("stages"), evaluation_status=row.get("status"),
-                     evaluation_report=str(batch / "output" / row["report"]) if row.get("report") else None)
+                     evaluation_report=str(report) if report else None)
+        if report is not None and (report / "result.json").is_file():
+            # RQ2: did Dagster load and complete the pipeline, what it produced.
+            state["execution"] = execution_summary(json.loads((report / "result.json").read_text()), report)
         if row.get("status") == "evaluated":
             state["status"] = "evaluated"
-        _write_state(ep_dir, state)
         events[ep_dir.name].emit("phase_finished", phase="evaluate", scores=row.get("scores"))
+        record_usage(ep_dir, state)
+        _write_state(ep_dir, state)
     return batch
 
 

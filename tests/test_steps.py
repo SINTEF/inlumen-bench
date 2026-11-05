@@ -92,7 +92,7 @@ def test_code_experiment_from_designs_pairs_each_design(tmp_path):
     assert len(eps) == 1 * 1 * 2 * 2  # designs × methods × models × repetitions
     assert {e["design_episode"] for e in eps} == {"001-design-p-m1-r0"}
     assert len({e["id"] for e in eps}) == len(eps)
-    assert exp.design_source == "designs from d1"
+    assert exp.design_source == "compositions from d1"
 
 
 def test_delete_experiment_and_dependents(tmp_path):
@@ -112,7 +112,7 @@ def test_old_experiments_load_as_code_from_reference(tmp_path):
         "name": "old", "cases": ["001_x"], "methods": ["direct"], "models": ["p:m"],
         "tracks": ["fixed_graph"], "repetitions": 1}))
     exp = Experiment.load(root)
-    assert exp.stage == "code" and exp.design_source == "reference designs"
+    assert exp.stage == "code" and exp.design_source == "reference compositions"
     assert exp.episodes()[0]["id"] == "001-direct-p-m-fg-r0"
 
 
