@@ -22,7 +22,7 @@ test = ["pytest>=8,<9"]
 evaluator = ["pydantic>=2,<3", "jsonschema==4.24.0"]
 # The `inlumen` method runs inLUMEN's own agents, published on PyPI. Pinned exactly:
 # experiments record this version, and it is a pre-release.
-inlumen = ["inlumen-agents[design,codegen]==1.0.0b6.dev0"]
+inlumen = ["inlumen-agents[design,codegen]==1.0.0b6.dev1"]
 
 [project.scripts]
 bench = "inlumen_bench.cli:app"
