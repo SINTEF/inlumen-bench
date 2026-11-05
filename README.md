@@ -110,7 +110,7 @@ authors' machine; it follows ServiceCraft's documented requalification workflow.
 ### Installing inLUMEN's agents
 The `inlumen` method imports [`inlumen-agents`](https://pypi.org/project/inlumen-agents/),
 which the `inlumen` extra installs from PyPI at the exact version pinned in
-`pyproject.toml` (currently `1.0.0b6.dev0`, a pre-release). The Docker image installs
+`pyproject.toml` (currently `1.0.0b6.dev1`, a pre-release). The Docker image installs
 the same extra. To benchmark another release, change the pin and rebuild.
 
 To try unreleased inLUMEN changes, install a checkout over the pinned release:
