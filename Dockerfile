@@ -5,7 +5,9 @@
 FROM docker:27.3.1-cli AS docker-cli
 FROM docker/buildx-bin:0.17.1 AS buildx
 
-FROM python:3.12.7-slim-bookworm
+# Not 3.12.7 or older: their ast.unparse writes f-strings that Python 3.11 (the target of
+# inLUMEN's generated code) cannot parse. 3.12.12 is checked.
+FROM python:3.12.12-slim-bookworm
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=buildx /buildx /usr/local/libexec/docker/cli-plugins/docker-buildx
 RUN apt-get update \

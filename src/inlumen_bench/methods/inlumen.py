@@ -28,9 +28,13 @@ import asyncio
 import json
 import re
 import time
+import tempfile
 import uuid
+from pathlib import Path
 
+from ..budget import BudgetExceeded
 from ..design import asset_name, check, from_task_graph
+from ..llm import LLMError
 from ..harness import default_names
 from ..package_harness import canvas_graph, submission_files
 from ..validate import mandatory_artifacts, validate
@@ -151,18 +155,27 @@ class Inlumen(Method):
         counters = self._counters()
         events, budget = ctx.events, ctx.budget
         pending: dict[str, float] = {}
+        failure: dict[str, BaseException] = {}
 
         class Budgeted(RecordingModelClient):
-            """Checks the budget and announces each request before it is sent."""
+            """Checks the budget and announces each request before it is sent.
+
+            autogen re-raises an agent's errors as a plain RuntimeError, so the
+            original one (budget, provider) is kept for the runner to classify.
+            """
 
             async def create(self, messages, **kwargs):
-                if budget is not None:
-                    budget.check()
-                request_id = uuid.uuid4().hex[:12]
-                pending["id"], pending["started"] = request_id, time.monotonic()
-                events.emit("request_started", request_id=request_id, purpose="design_agent",
-                            model=str(ctx.llm.ref), attempt=0, max_tokens=None)
-                return await super().create(messages, **kwargs)
+                try:
+                    if budget is not None:
+                        budget.check()
+                    request_id = uuid.uuid4().hex[:12]
+                    pending["id"], pending["started"] = request_id, time.monotonic()
+                    events.emit("request_started", request_id=request_id, purpose="design_agent",
+                                model=str(ctx.llm.ref), attempt=0, max_tokens=None)
+                    return await super().create(messages, **kwargs)
+                except Exception as exc:
+                    failure.setdefault("error", exc)
+                    raise
 
         def record(event: dict) -> None:
             counters["model_requests"] += 1
@@ -188,8 +201,23 @@ class Inlumen(Method):
         events.emit("stage_started", stage="inLUMEN design agent")
         catalog = Catalog.default()
         model = Budgeted(self.design_model(ctx), lambda _event: None)
-        result = asyncio.run(design(ctx.prompt, model=model, catalog=catalog, name=ctx.case_id,
-                                    events=record, max_tool_iterations=opts["max_tool_iterations"]))
+
+        async def run_design():
+            try:
+                return await design(ctx.prompt, model=model, catalog=catalog, name=ctx.case_id,
+                                    events=record, max_tool_iterations=opts["max_tool_iterations"])
+            finally:
+                await model.close()
+
+        try:
+            result = asyncio.run(run_design())
+        except Exception as exc:
+            original = failure.get("error")
+            if isinstance(original, BudgetExceeded):
+                raise original from exc
+            if original is not None:
+                raise LLMError(f"{type(original).__name__}: {original}") from exc
+            raise
         counters["design_repairs"] = int(result.repaired)
         (ctx.work_dir / "inlumen-graph.json").write_text(json.dumps(result.graph, indent=2))
         (ctx.work_dir / "inlumen-design.json").write_text(json.dumps(
@@ -259,6 +287,7 @@ class Inlumen(Method):
     def generate(self, ctx: EpisodeContext) -> MethodResult:
         _require_package()
         from inlumen.codegen.run import generate
+        from inlumen.codegen.llm import LLMGenerationError
         from inlumen.codegen.sandbox import DockerSandbox, NoSandbox
 
         opts = {**DEFAULTS, **ctx.options}
@@ -280,16 +309,24 @@ class Inlumen(Method):
 
         ctx.events.emit("phase_started", phase="codegen")
         ctx.events.emit("stage_started", stage="inLUMEN code generator")
-        sandbox = DockerSandbox() if opts["sandbox"] == "docker" else NoSandbox()
+        # Workspaces go under the bench's temporary folder: in Docker it is a host
+        # path (the sandbox's sibling containers mount it), and for dashboard runs it
+        # is inside the experiment, so Stop finds and removes those containers.
+        workdir = str(Path(tempfile.gettempdir()) / "inlumen-codegen")
+        sandbox = DockerSandbox(workdir=workdir) if opts["sandbox"] == "docker" else NoSandbox()
         runtime = {"python_version": "3.11", "allowed_packages": installed_packages(ctx.contract),
                    "allow_unlisted_model_packages": False, "network_allowed": False,
                    "max_runtime_seconds": 900}
         options = {"repair_attempts": opts["repair_attempts"],
                    # The bench's budget applies; inLUMEN's own limits must not cut a run short first.
                    "max_llm_requests": 32, "max_reported_cost_usd": 100, "max_generation_seconds": 3600}
-        result = asyncio.run(generate(graph, model=BenchCodegenModel(ctx, counters), sandbox=sandbox,
-                                      files=ctx.workspace / "inputs", instruction=ctx.prompt,
-                                      runtime=runtime, options=options))
+        try:
+            result = asyncio.run(generate(graph, model=BenchCodegenModel(ctx, counters), sandbox=sandbox,
+                                          files=ctx.workspace / "inputs", instruction=ctx.prompt,
+                                          runtime=runtime, options=options))
+        except LLMGenerationError as exc:
+            # The model's reply was unusable (e.g. not one JSON object): the model failed, not the bench.
+            return MethodResult("generation_failed", error=f"inLUMEN: {exc}", counters=counters)
         counters["node_generations"] = sum(names[t["id"]] in result.packages for t in design["tasks"])
         (ctx.work_dir / "inlumen-codegen.json").write_text(json.dumps(
             {"accepted": result.accepted, "validation": result.validation,

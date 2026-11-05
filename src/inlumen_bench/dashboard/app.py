@@ -501,7 +501,9 @@ def launch_page() -> None:
                                   models=models, repetitions=int(reps), seed=int(seed), limits=limits,
                                   method_options={"inlumen": {"design_repairs": int(repairs)}})
             else:
-                options = {m: {"max_repairs": int(repairs)} for m in methods if m != "direct"}
+                # inlumen-standalone reads max_repairs; inLUMEN's code generator, repair_attempts (0-6).
+                options = {m: {"max_repairs": int(repairs), "repair_attempts": min(int(repairs), 6)}
+                           for m in methods if m != "direct"}
                 create_experiment(root, c, stage="code", design_from=source,
                                   design_models=sorted({d["model"] for d in designs}) or None, name=name,
                                   cases=c.resolve_cases(numbers), methods=methods, models=models,

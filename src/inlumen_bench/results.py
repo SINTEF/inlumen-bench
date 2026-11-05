@@ -22,7 +22,8 @@ def episodes(root: Path) -> list[dict]:
     rows = []
     for ep in exp.episodes():
         state = episode_state(root / "episodes" / ep["id"]) or {**ep, "status": "pending"}
-        rows.append({**ep, **state})
+        # The method that ran: experiments from before 0.2 ran `inlumen-standalone` as `inlumen`.
+        rows.append({**ep, **state, "method": exp.method_for(ep["method"])})
     return rows
 
 

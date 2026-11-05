@@ -192,3 +192,54 @@ def test_experiments_from_before_keep_the_standalone_method(tmp_path):
 
 def test_asyncio_is_not_left_running():
     asyncio.run(asyncio.sleep(0))
+
+
+def test_a_design_budget_stop_is_reported_as_a_budget_failure(tmp_path, monkeypatch):
+    from inlumen_bench.budget import BudgetExceeded, Limits
+
+    ctx = _ctx(tmp_path, FakeLLM())
+    ctx.budget = Budget(Limits(max_requests=1))
+    monkeypatch.setattr(adapter.Inlumen, "design_model", lambda self, ctx: _design_model())
+    with pytest.raises(BudgetExceeded):
+        get_method("inlumen").design(ctx)
+
+
+def test_results_name_the_method_that_ran(tmp_path):
+    from inlumen_bench.results import episodes
+
+    root = tmp_path / "old"
+    root.mkdir()
+    (root / "experiment.json").write_text(json.dumps(
+        {"name": "old", "cases": ["001_x"], "methods": ["inlumen"], "models": ["p:m"],
+         "tracks": ["fixed_graph"], "repetitions": 1}))
+    assert {row["method"] for row in episodes(root)} == {"inlumen-standalone"}
+
+
+def test_the_sandbox_works_under_the_bench_temporary_folder(tmp_path, monkeypatch):
+    import tempfile
+
+    seen = {}
+    import inlumen.codegen.run as run_module
+    real = run_module.generate
+
+    async def capture(graph, **kwargs):
+        seen["sandbox"] = kwargs["sandbox"]
+        kwargs["sandbox"] = run_module.NoSandbox()
+        return await real(graph, **kwargs)
+
+    monkeypatch.setattr(run_module, "generate", capture)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "bench-tmp"))
+    monkeypatch.setattr(adapter, "validate", lambda *a, **k: PublicReport("pass", "done"))
+    ctx = _ctx(tmp_path, FakeLLM(), design=DESIGN, options={"sandbox": "docker"})
+    assert get_method("inlumen").generate(ctx).status == "generated"
+    assert seen["sandbox"].workdir == str(tmp_path / "bench-tmp" / "inlumen-codegen")
+
+
+def test_an_unusable_model_reply_is_a_generation_failure(tmp_path):
+    class Garbled(FakeLLM):
+        def chat(self, messages, purpose="", max_tokens=None):
+            reply = super().chat(messages, purpose, max_tokens)
+            return SimpleNamespace(**{**vars(reply), "text": reply.text + "\n{}"})
+
+    result = get_method("inlumen").generate(_ctx(tmp_path, Garbled(), design=DESIGN))
+    assert result.status == "generation_failed" and "invalid JSON" in result.error
