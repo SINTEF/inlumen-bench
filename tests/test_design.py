@@ -6,7 +6,7 @@ import pytest
 from inlumen_bench import design_score
 from inlumen_bench.design import asset_name, check, edges, parse_design, to_project_json, topo_order
 from inlumen_bench.harness import RUNTIME, default_names, definitions
-from inlumen_bench.methods.inlumen import Inlumen
+from inlumen_bench.methods.inlumen_standalone import InlumenStandalone as Inlumen
 from inlumen_bench.results import pass_at_k
 from inlumen_bench.validate import PublicReport
 
@@ -102,7 +102,7 @@ def test_pass_at_k():
 
 def test_validator_infra_error_is_not_a_model_failure(design, tmp_path, monkeypatch):
     from inlumen_bench.events import EventLog
-    from inlumen_bench.methods import inlumen
+    from inlumen_bench.methods import inlumen_standalone as inlumen
     from inlumen_bench.methods.base import EpisodeContext, InfraError
 
     workspace = tmp_path / "workspace"

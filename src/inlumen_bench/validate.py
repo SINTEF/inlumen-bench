@@ -10,6 +10,7 @@ in the public prompt) were not written.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -129,8 +130,10 @@ def _run(submission, inputs, prompt, work, emit, start, timeout_s, memory, cpus,
         (outputs, "/outputs", False),
         (evidence, "/evidence", False),
     ]
+    experiment = os.environ.get("INLUMEN_BENCH_EXPERIMENT")
     args = [
         "docker", "run", "--rm", f"--name={name}",
+        *([f"--label=inlumen-bench.experiment={experiment}"] if experiment else []),
         "--network=none", "--read-only", "--user=65532:65532", "--cap-drop=ALL",
         "--security-opt=no-new-privileges", "--pids-limit=128",
         f"--memory={memory}", f"--cpus={cpus}", "--tmpfs=/tmp:rw,nosuid,size=512m", "--workdir=/tmp",

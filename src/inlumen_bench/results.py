@@ -1,4 +1,4 @@
-"""Aggregated results per method × model × track, shared by the CLI and dashboard.
+"""Aggregated results per method × model × design source, shared by the CLI and dashboard.
 
 Denominators are explicit: every scheduled episode counts. Generation failures
 count as failures; pending episodes and infrastructure errors are reported apart
@@ -29,7 +29,7 @@ def episodes(root: Path) -> list[dict]:
 def _outcome(row: dict) -> str:
     """scored | failed (generation) | pending | infra."""
     status = row.get("status")
-    if status == "evaluated":
+    if status in ("evaluated", "designed"):
         return "scored"
     if status == "generation_failed":
         return "failed"
@@ -47,7 +47,7 @@ def pass_at_k(n: int, c: int, k: int) -> float | None:
     return 1.0 - comb(n - c, k) / comb(n, k)
 
 
-def summarize(root: Path, group_by: tuple[str, ...] = ("method", "model", "track")) -> list[dict]:
+def summarize(root: Path, group_by: tuple[str, ...] = ("method", "model", "design")) -> list[dict]:
     rows = episodes(root)
     exp = Experiment.load(root)
     cells: dict[tuple, list[dict]] = {}
@@ -68,6 +68,9 @@ def summarize(root: Path, group_by: tuple[str, ...] = ("method", "model", "track
             infra=outcomes.count("infra"),
             decided=len(decided),
         )
+        # Step 1: the share of episodes that produced a structurally valid design.
+        cell["valid_design"] = (round(sum(r.get("status") == "designed" for r in decided) / len(decided), 4)
+                                if decided else None)
         for score in SCORE_KEYS:
             hits = sum(1 for r in decided if (r.get("scores") or {}).get(score) == 1)
             cell[score] = round(hits / len(decided), 4) if decided else None

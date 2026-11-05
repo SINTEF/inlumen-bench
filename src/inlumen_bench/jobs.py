@@ -6,6 +6,12 @@ experiments started from the CLI show up as well.
 
 from __future__ import annotations
 
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -18,8 +24,97 @@ from .progress import ProgressTracker
 from .runner import Experiment, episode_state
 
 
+EXPERIMENT_ENV = "INLUMEN_BENCH_EXPERIMENT"
+CONTAINER_LABEL = "inlumen-bench.experiment"
+
+
 class JobBusy(Exception):
     pass
+
+
+def run_cli(log, stop: threading.Event, experiment: Path, *args: str) -> None:
+    """Runs `bench <args>` for one experiment in its own process group.
+
+    The experiment's temporary files (and so every Docker mount of the validator
+    and evaluator) live under `<experiment>/.tmp`, which lets Stop find and kill
+    the run's containers. Stop kills the whole process group at once.
+    """
+    tmp = experiment / ".tmp"
+    tmp.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, EXPERIMENT_ENV: experiment.name, "TMPDIR": str(tmp), "PYTHONUNBUFFERED": "1",
+           "COLUMNS": "160", "INLUMEN_BENCH_RUNS_DIR": str(experiment.parent)}
+    proc = subprocess.Popen([sys.executable, "-m", "inlumen_bench.cli", *args], env=env,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                            start_new_session=True)
+
+    def pump() -> None:
+        for line in proc.stdout:
+            if line.strip():
+                log(line.rstrip())
+
+    reader = threading.Thread(target=pump, daemon=True)
+    reader.start()
+    while proc.poll() is None:
+        if stop.wait(0.3):
+            kill_run(proc, experiment, log)
+            break
+    reader.join(timeout=2)
+    if not stop.is_set():
+        shutil.rmtree(tmp, ignore_errors=True)
+        if proc.returncode:
+            raise RuntimeError(f"bench {args[0]} exited with code {proc.returncode}")
+
+
+def kill_run(proc: subprocess.Popen | None, experiment: Path, log=print) -> None:
+    """Kills a run right away: its processes, its Docker containers, and marks
+    the episodes that were running as stopped (they rerun on Resume)."""
+    if proc is not None and proc.poll() is None:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait(timeout=10)
+    killed = kill_containers(experiment)
+    stopped = mark_stopped(experiment)
+    shutil.rmtree(experiment / ".tmp", ignore_errors=True)
+    log(f"stopped: processes killed, {killed} containers removed, {stopped} episodes marked stopped")
+
+
+def kill_containers(experiment: Path) -> int:
+    """Removes running containers labelled with, or mounting folders of, this experiment."""
+    try:
+        ids = subprocess.run(["docker", "ps", "-q"], capture_output=True, text=True, timeout=20).stdout.split()
+        if not ids:
+            return 0
+        info = json.loads(subprocess.run(["docker", "inspect", *ids], capture_output=True, text=True,
+                                         timeout=30).stdout or "[]")
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+        return 0
+    root = str(experiment.resolve()).rstrip("/") + "/"
+    mine = []
+    for c in info:
+        labels = (c.get("Config") or {}).get("Labels") or {}
+        # Docker Desktop reports host paths with a /host_mnt prefix.
+        sources = [m.get("Source", "").removeprefix("/host_mnt") + "/" for m in c.get("Mounts") or []]
+        if labels.get(CONTAINER_LABEL) == experiment.name or any(s.startswith(root) for s in sources):
+            mine.append(c["Id"])
+    if mine:
+        subprocess.run(["docker", "rm", "-f", *mine], capture_output=True, timeout=60)
+    return len(mine)
+
+
+def mark_stopped(experiment: Path) -> int:
+    count = 0
+    for state_file in (experiment / "episodes").glob("*/episode.json"):
+        try:
+            state = json.loads(state_file.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if state.get("status") == "running":
+            state.update(status="stopped", error="stopped by the user")
+            state_file.write_text(json.dumps(state, indent=2) + "\n")
+            count += 1
+    return count
 
 
 class Jobs:

@@ -42,6 +42,8 @@ class EpisodeContext:
     # Fixed-graph track: task ID → asset name required by the contract.
     asset_names: dict[str, str] = field(default_factory=dict)
     options: dict = field(default_factory=dict)
+    # Code from a step-1 design: the task graph to implement (not ServiceCraft's).
+    design: dict | None = None
 
     @property
     def prompt(self) -> str:
@@ -75,6 +77,10 @@ class Method:
 
     def generate(self, ctx: EpisodeContext) -> MethodResult:
         raise NotImplementedError
+
+    def design(self, ctx: EpisodeContext) -> MethodResult:
+        """Step 1 only: write `work/design.json`; status "designed" on success."""
+        raise NotImplementedError(f"{self.name} has no design step")
 
 
 def parse_bundle(text: str) -> dict[str, str]:

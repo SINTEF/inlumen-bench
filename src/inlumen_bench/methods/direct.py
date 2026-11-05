@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from .base import BUNDLE_INSTRUCTIONS, EpisodeContext, Method, MethodResult, parse_bundle, write_bundle
 
 SYSTEM = """\
@@ -11,11 +13,16 @@ the task exactly as specified. Follow the runtime and submission contract precis
 
 class Direct(Method):
     name = "direct"
-    version = "1"
+    version = "1.1"
 
     def generate(self, ctx: EpisodeContext) -> MethodResult:
         user = [f"# Task\n\n{ctx.prompt}"]
-        if ctx.provided_graph:
+        if ctx.design is not None:
+            design = json.dumps(ctx.design, indent=1)
+            (ctx.work_dir / "design.json").write_text(design)
+            user.append("# Pipeline design\n\nImplement this task graph: one Dagster asset per task, named "
+                        f"after the task id, reading and writing exactly these artifacts.\n\n```json\n{design}\n```")
+        elif ctx.provided_graph:
             user.append(f"# Provided task graph (`provided_graph.json`)\n\n```json\n{ctx.provided_graph}```")
         user.append(f"# Runtime and submission contract\n\n{ctx.contract}")
         user.append(f"# Output format\n\n{BUNDLE_INSTRUCTIONS}")

@@ -77,7 +77,7 @@ class ProgressTracker:
                 if view:
                     self.durations.setdefault(view.group, []).append(time.monotonic() - view.started)
                     del self.active[eid]
-                if e.get("status") in ("generated", "evaluated"):
+                if e.get("status") in ("generated", "evaluated", "designed"):
                     self.done += 1
                 else:
                     self.failed += 1

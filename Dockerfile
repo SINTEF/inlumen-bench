@@ -17,7 +17,8 @@ RUN apt-get update \
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN pip install --no-cache-dir '.[evaluator]'
+# `inlumen`: inLUMEN's agents (inlumen-agents) from PyPI, at the version pinned in pyproject.toml.
+RUN pip install --no-cache-dir '.[evaluator,inlumen]'
 
 ENV INLUMEN_BENCH_IN_DOCKER=1 \
     INLUMEN_BENCH_TOOL_PYTHON=/usr/local/bin/python \

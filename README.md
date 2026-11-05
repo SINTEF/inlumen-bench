@@ -2,10 +2,14 @@
 
 A generation driver and dashboard for benchmarking pipeline design and code
 generation on the [ServiceCraft](https://github.com/aliduabubakari/servicecraft)
-corpus. It runs methods across cases, models, tracks and repetitions, records
+corpus in two steps, pipeline design and then code generation, across cases,
+models and repetitions. It records
 telemetry for every model request, and scores submissions with ServiceCraft's
-own evaluator. It does not depend on inLUMEN; pipeline designs are exported as
-inLUMEN Project JSON so they can be opened with inLUMEN's Import button.
+own evaluator. The `inlumen` method runs inLUMEN's own design and code generation
+agents from the [`inlumen-agents`](https://pypi.org/project/inlumen-agents/) package
+on PyPI (see [Installing inLUMEN's agents](#installing-inlumens-agents));
+pipeline designs are exported as inLUMEN Project JSON so they can be opened with
+inLUMEN's Import button.
 
 ## Quick start with Docker
 Only Docker is needed on the host.
@@ -19,9 +23,14 @@ In the dashboard:
    pipeline graph, tasks and input data, or download it as inLUMEN Project JSON. The
    Evaluator tab prepares ServiceCraft's evaluator once per machine (about 7 minutes).
 2. **Models**: add an endpoint (OpenRouter, Ollama, any OpenAI-compatible URL) and test it.
-3. **Launch**: pick methods, models, tracks, cases and repetitions.
-4. **Experiments**: live progress, results per method × model × track, and every
-   episode's files, scores and Project JSON.
+3. **Launch**: choose the step.
+   - **1 · Pipeline design**: models turn prompts into task graphs, checked and
+     compared with the reference graph. Nothing runs in Docker.
+   - **2 · Code generation**: models write Dagster code for a design, and
+     ServiceCraft scores it. The design is the reference graph or one from a step 1
+     experiment ("Generate code" on a design experiment opens this with its designs).
+4. **Experiments**: live progress, results, and every episode's design graph,
+   files, scores and Project JSON. Delete an experiment from its Delete menu.
 
 The same can be done from the command line with `scripts/bench-docker`, which takes
 the same arguments as `bench` (see below):
@@ -30,7 +39,7 @@ scripts/bench-docker datasets fetch
 scripts/bench-docker setup
 scripts/bench-docker run pilot -c 016 --model openrouter:<model-id> -m inlumen -m direct -n 3
 ```
-After changing the code, rebuild with `docker compose build` (or `docker build -t inlumen-bench:0.1.0 .`).
+After changing the code, rebuild with `docker compose build` (or `docker build -t inlumen-bench:0.2.0 .`).
 
 ### Docker settings
 Put these in a `.env` file next to `compose.yaml` (all optional):
@@ -80,7 +89,7 @@ long prompts. Set the profile's parallel requests to what the server allows.
 Python 3.11+ (or [uv](https://docs.astral.sh/uv/)) and a running Docker engine.
 ```sh
 uv venv --python 3.12 .venv
-uv pip install -e '.[test]'
+uv pip install -e '.[test,inlumen]'   # inlumen: inLUMEN's agents, from PyPI (see below)
 bench config set data_dir ~/Documents/Datasets
 bench datasets fetch && bench datasets check
 bench setup
@@ -98,17 +107,56 @@ Avoid folders synced by iCloud.
 `bench setup` is needed because ServiceCraft's specs pin Docker image IDs from the
 authors' machine; it follows ServiceCraft's documented requalification workflow.
 
+### Installing inLUMEN's agents
+The `inlumen` method imports [`inlumen-agents`](https://pypi.org/project/inlumen-agents/),
+which the `inlumen` extra installs from PyPI at the exact version pinned in
+`pyproject.toml` (currently `1.0.0b6.dev0`, a pre-release). The Docker image installs
+the same extra. To benchmark another release, change the pin and rebuild.
+
+To try unreleased inLUMEN changes, install a checkout over the pinned release:
+```sh
+uv pip install -e '../inLUMEN/packages/agents[design,codegen]'
+```
+Every `inlumen` episode records the package version it ran in `work/inlumen.json`.
+
 ## Methods
 | Method | What it does |
 | --- | --- |
 | `direct` | One request for the whole Dagster bundle; no repair. The baseline. |
-| `inlumen` | inLUMEN-style construction, reimplemented standalone: design → one model request per asset in dependency order → public validation → targeted repair of the failing asset. |
+| `inlumen` | inLUMEN's own agents: the pipeline design agent (step 1) and the code generator (step 2), from `inlumen-agents`. |
+| `inlumen-standalone` | The bench's earlier reimplementation of inLUMEN-style construction: design → one model request per asset → public validation → targeted repair. Experiments made before bench 0.2 used it under the name `inlumen`, and still do when resumed. |
+
+Step 1 (design) uses `inlumen`. Step 2 (code) compares `inlumen` and `direct` (and
+`inlumen-standalone`) on the same design.
 
 `inlumen` in detail:
-1. **Design.** Natural-language track: the prompt becomes a task graph shaped like
-   ServiceCraft's `task_graph.json` (tasks, input and output artifacts); structural
-   problems are fed back for up to 2 design repairs. Fixed-graph track: the
-   provided graph is used. As in inLUMEN's pipeline agent, each input file with its
+1. **Design** (step 1). inLUMEN's pipeline design agent builds an inLUMEN graph from
+   the prompt with its own tools, validation and repair round
+   (`inlumen.design.run.design`). It runs on the episode's endpoint and model through
+   an OpenAI-compatible client (it needs tool calls); each request is recorded as a
+   `design_agent` request and counted against the budget (tokens, no cost).
+   inLUMEN's graph is saved as `work/inlumen-graph.json` and `work/project.json`.
+   inLUMEN chooses file names only when it generates code, so a **naming pass** (one
+   bench request, purpose `naming`, one retry) maps each Source to the input files it
+   reads and each Task to the artifacts it writes, without changing the steps. The
+   result is checked like any design and saved as `work/design.json`. The naming pass
+   is the bench's, not inLUMEN's; its requests are counted as `naming_requests`.
+2. **Code** (step 2). The design becomes an inLUMEN graph whose tasks declare their
+   artifact files, and inLUMEN's code generator (`inlumen.codegen.run.generate`)
+   writes one Task package per task, with its own planning, repair rounds and
+   validation, in Docker as inLUMEN runs by default. Allowed packages are the
+   contract's installed packages, with no network. Requests go through the bench's
+   client. The packages are kept in `work/packages/`; the submission runs each one as
+   a Dagster asset (`nodes/<asset>_main.py`, its contract in `nodes/<asset>_manifest.py`,
+   wiring in `definitions.py` and `bench_inlumen_runtime.py`). Public validation runs
+   once and is only recorded: repairs are inLUMEN's own.
+   Options (`method_options.inlumen`): `sandbox` (`docker` or `none`),
+   `repair_attempts` (default 2), `max_tool_iterations` (design, default 30).
+
+`inlumen-standalone` in detail:
+1. **Design** (step 1). The prompt becomes a task graph shaped like ServiceCraft's
+   `task_graph.json` (tasks, input and output artifacts); structural problems are
+   fed back for up to 2 design repairs. In step 2 the design is given instead. As in inLUMEN's pipeline agent, each input file with its
    own role starts its own branch, independent branches stay independent, and
    branches meet at a joining task with one input per branch. The design is saved as
    `work/design.json` and as inLUMEN Project JSON in `work/project.json`. Ports there
@@ -121,23 +169,30 @@ authors' machine; it follows ServiceCraft's documented requalification workflow.
    image. A failure is traced to an asset, and only that asset is regenerated with
    the error (up to `max_repairs`, default 3). Private checks are never shown.
 
-## Tracks
-- `fixed_graph`: the method also gets the reviewed graph and the asset names the
-  evaluator expects. Measures code generation.
-- `natural_language`: the prompt only. Measures design and code. ServiceCraft's
-  graph check needs exact asset names, which the prompt does not give, so
-  `complete_success` is rare here; the other stages are still scored.
+## Steps
+- **Design** (`--step design`): the prompt only. Scored by the design scores
+  below; a design is *valid* when it passes the structural check.
+- **Code** (`--step code`), with `--design-from`:
+  - `reference`: the method gets ServiceCraft's reviewed graph and the asset names
+    the evaluator expects (the former `fixed_graph` track). Measures code generation.
+  - a design experiment: the method gets that experiment's valid designs (frozen
+    when the code experiment is created). Measures the whole chain. ServiceCraft's
+    graph check needs the reference asset names, which a generated design doesn't
+    have, so `complete_success` is rare here; the other stages are still scored.
+
+Experiments made before the two steps load as code experiments; their
+`natural_language` episodes did design and code in one go.
 
 ## Scores
 - **ServiceCraft stages** (per episode): submission, static, definition graph,
   execution, output contracts, behavioural oracle; `complete_success` needs all six.
-- **Design scores** (natural-language track, provisional): generated tasks are
+- **Design scores** (step 1, provisional): generated tasks are
   matched to the reference graph by the artifacts they write (the prompt names
   every mandatory artifact). Reported: artifact coverage, task recall, one-to-one
   matches, split/merged tasks, dependency recall, extra dependencies and an
   overall `design_correct`. Labelled provisional until ServiceCraft has a reviewed
   mapping procedure.
-- **Per method × model × track**: rates over finished episodes (generation
+- **Per method × model × design source**: rates over finished episodes (generation
   failures count as failures; pending and infrastructure errors are left out),
   mean ± std of the success rate across repetitions, pass@1 and pass@k, cost,
   cost per success, tokens and median generation time.
@@ -156,12 +211,19 @@ Keys are never written into run folders or returned by the dashboard.
 
 ## Experiments from the command line
 ```sh
-bench run pilot -c 016 -c 001 -m inlumen -m direct \
-  --model openrouter:<model-id> --model ollama:qwen3-coder \
-  -t fixed_graph -t natural_language -n 3 --max-cost 2 --max-seconds 1800
-bench run pilot --resume      # continue after a crash or Ctrl-C
-bench evaluate pilot          # score anything generated but not yet evaluated
-bench status pilot
+# Step 1: designs
+bench run designs-1 --step design -c 016 -c 001 \
+  --model openrouter:<model-id> --model ollama:qwen3:32b-16k -n 3
+# Step 2: code from the reference designs, or from step 1
+bench run code-ref --step code --design-from reference -c 016 -c 001 -m inlumen -m direct \
+  --model ollama:qwen3-coder -n 3 --max-cost 2 --max-seconds 1800
+bench run code-1 --step code --design-from designs-1 --design-model ollama:qwen3:32b-16k \
+  -m inlumen -m direct --model ollama:qwen3-coder
+bench run code-1 --resume     # continue after a crash or Ctrl-C
+bench evaluate code-1         # score anything generated but not yet evaluated
+bench status code-1
+bench list                    # all experiments
+bench delete code-1           # remove an experiment folder (asks first; -y to skip)
 ```
 An interactive terminal shows progress bars; otherwise progress is written as
 plain log lines. Experiments started from the CLI also appear in the dashboard.
@@ -182,5 +244,7 @@ case 016, including a deliberately broken asset that the repair loop fixes:
 ```sh
 python tests/fake_server.py 8765
 bench providers add fake --base-url http://127.0.0.1:8765/v1   # host.docker.internal from Docker
-bench run offline -c 016 -m inlumen -m direct --model fake:fake-coder -t fixed_graph -t natural_language
+bench run offline -c 016 -m inlumen-standalone -m direct --model fake:fake-coder
 ```
+The canned replies are for `inlumen-standalone` and `direct`. The `inlumen` method is
+tested offline in `tests/test_inlumen_agents.py`, with scripted models.

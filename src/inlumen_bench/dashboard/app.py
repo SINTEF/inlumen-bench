@@ -18,15 +18,18 @@ from inlumen_bench import __version__, results
 from inlumen_bench.config import resolve_data_dir
 from inlumen_bench.corpus import Corpus, CorpusError, fetch, setup
 from inlumen_bench.events import read_events
-from inlumen_bench.jobs import JobBusy, Jobs, snapshot
+from inlumen_bench.jobs import JobBusy, Jobs, kill_run, run_cli, snapshot
 from inlumen_bench.methods import METHODS
 from inlumen_bench.providers import PRESETS, Profile, load_profiles, remove_profile, upsert_profile
-from inlumen_bench.runner import Experiment, create_experiment, episode_state, run_experiment
+from inlumen_bench.runner import (REFERENCE, Experiment, create_experiment, delete_experiment, dependents,
+                                  episode_state, successful_designs)
 
 RUNS = Path(os.environ.get("INLUMEN_BENCH_RUNS_DIR", "runs")).resolve()
 NAME_RE = r"^[A-Za-z0-9_.-]{1,60}$"
-STATUS_ICON = {"evaluated": "🟢", "generated": "🔵", "running": "🔵", "generation_failed": "🔴",
-               "infra_error": "🟠", "pending": "⚪"}
+STATUS_ICON = {"evaluated": "🟢", "designed": "🟢", "generated": "🔵", "running": "🔵", "stopped": "⏹️",
+               "generation_failed": "🔴", "infra_error": "🟠", "pending": "⚪"}
+FINISHED = ("evaluated", "designed", "generation_failed")
+STEP_LABEL = {"design": "1 · Pipeline design", "code": "2 · Code generation"}
 
 st.set_page_config(page_title="inlumen-bench", page_icon=":material/science:", layout="wide")
 
@@ -56,19 +59,31 @@ def usd(value) -> str:
     return "—" if value is None else f"${value:.4f}" if value < 1 else f"${value:.2f}"
 
 
-def run_job(log, stop, root: Path, workers: int, evaluate: bool) -> None:
-    from inlumen_bench.evaluate import evaluate_experiment
+def design_experiments() -> list[str]:
+    return [n for n in experiment_names() if Experiment.load(RUNS / n).stage == "design"]
 
-    c = corpus()
-    log("generation started")
-    run_experiment(root, c, workers=workers, stop=stop)
-    if stop.is_set():
-        log("stopped; finished episodes are kept, resume to continue")
-        return
-    log("generation finished")
-    if evaluate:
-        evaluate_experiment(root, c, log=log)
-    log("done")
+
+def design_dot(design: dict) -> str:
+    """Graphviz source for a task graph: input files, tasks, artifact-labelled edges."""
+    from inlumen_bench.design import edges
+    lines = ['digraph { rankdir=LR; node [fontname="Helvetica" fontsize=11]; edge [fontname="Helvetica" fontsize=9];']
+    inputs = {i["id"] for i in design.get("inputs", [])} | {
+        i for t in design["tasks"] for i in t.get("inputs", []) if i.startswith("input:")}
+    for i in sorted(inputs):
+        lines.append(f'"{i}" [shape=note label="{i.split(":", 1)[1]}" style=filled fillcolor="#eef3f8"];')
+    for t in design["tasks"]:
+        lines.append(f'"{t["id"]}" [shape=box style="rounded,filled" fillcolor="#dbe7f3" label="{t["id"]}"];')
+        for item in t.get("inputs", []):
+            if item.startswith("input:"):
+                lines.append(f'"{item}" -> "{t["id"]}";')
+    lines += [f'"{a}" -> "{b}" [label="{art}"];' for a, b, art in edges(design)]
+    return "\n".join(lines + ["}"])
+
+
+def launch_run(root: Path, workers: int = 2, evaluate: bool = True) -> None:
+    """Runs (or resumes) an experiment in its own process; Stop kills it at once."""
+    start("experiment", f"exp:{root.name}", run_cli, root, "run", root.name, "--resume", "--plain",
+          "--workers", str(workers), "--evaluate" if evaluate else "--no-evaluate")
 
 
 def start(kind: str, label: str, fn, *args) -> None:
@@ -98,19 +113,33 @@ def experiments_page() -> None:
             status = (episode_state(RUNS / name / "episodes" / ep["id"]) or {}).get("status", "pending")
             counts[status] = counts.get(status, 0) + 1
         total = sum(counts.values())
-        finished = counts.get("evaluated", 0) + counts.get("generation_failed", 0)
-        rows.append({"name": name, "running": bool(jobs().running_for(f"exp:{name}")),
+        finished = sum(counts.get(k, 0) for k in FINISHED)
+        rows.append({"name": name, "step": STEP_LABEL[exp.stage], "designs": exp.design_source,
+                     "running": bool(jobs().running_for(f"exp:{name}")),
                      "progress": finished / total if total else 0.0, "episodes": total,
-                     "methods": ", ".join(exp.methods), "models": ", ".join(exp.models),
-                     "tracks": ", ".join(exp.tracks), "cases × reps": f"{len(exp.cases)} × {exp.repetitions}",
+                     "methods": ", ".join(exp.methods) if exp.stage == "code" else "—",
+                     "models": ", ".join(exp.models), "cases × reps": f"{len(exp.cases)} × {exp.repetitions}",
                      "created": exp.created_at.replace("T", " ")[:16]})
-    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", column_config={
+    # A new key after a delete clears the selection, so no other experiment gets selected by position.
+    picked = st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", on_select="rerun",
+                          selection_mode="single-row", key=f"experiment-list-{st.session_state.get('list_version', 0)}",
+                          column_config={
         "progress": st.column_config.ProgressColumn("finished", min_value=0, max_value=1, format="percent"),
         "running": st.column_config.CheckboxColumn("running")})
-
+    selected = picked.selection.rows
     wanted = st.query_params.get("exp")
-    name = st.selectbox("Experiment", names, index=names.index(wanted) if wanted in names else 0)
-    st.query_params["exp"] = name
+    if selected:
+        name = names[selected[0]]
+        st.query_params["exp"] = name
+    elif st.session_state.get("had_selection"):
+        st.query_params.pop("exp", None)  # the row was unselected
+        name = None
+    else:
+        name = wanted if wanted in names else None  # opened by link, e.g. after Launch
+    st.session_state["had_selection"] = bool(selected)
+    if name is None:
+        st.caption("Click an experiment in the list to see its progress, results and episodes.")
+        return
     experiment_detail(name)
 
 
@@ -118,34 +147,84 @@ def experiment_detail(name: str) -> None:
     root = RUNS / name
     exp = Experiment.load(root)
     label = f"exp:{name}"
+    running = bool(jobs().running_for(label))
     limits = ", ".join(f"{k.removeprefix('max_')} {v}" for k, v in exp.limits.items()) or "none"
-    st.caption(f"{len(exp.cases)} cases · {', '.join(exp.methods)} · {', '.join(exp.models)} · "
-               f"{', '.join(exp.tracks)} · {exp.repetitions} repetitions · limits {limits} · "
+    what = (f"{', '.join(exp.methods)} · " if exp.stage == "code" else "") + f"{', '.join(exp.models)}"
+    st.header(name, divider="gray")
+    st.caption(f"**{STEP_LABEL[exp.stage]}** · {exp.design_source if exp.stage == 'code' else 'prompt → task graph'}"
+               f" · {len(exp.cases)} cases · {what} · {exp.repetitions} repetitions · limits {limits} · "
                f"dataset {(exp.dataset.get('commit') or '')[:12]}")
 
-    a, b, c, _ = st.columns([1, 1, 1, 3])
-    workers = 2
-    if a.button("Resume", width="stretch", help="Run the episodes that are not finished yet."):
-        start("experiment", label, run_job, root, workers, True)
-    if b.button("Evaluate pending", width="stretch", help="Score generated episodes with ServiceCraft."):
-        from inlumen_bench.evaluate import evaluate_experiment
-        start("evaluate", label, lambda log, stop: evaluate_experiment(root, corpus(), log=log))
-    if c.button("Stop", width="stretch", help="Stop after the episodes that are running now."):
-        st.toast("Stopping after the running episodes." if jobs().stop(label)
-                 else "Not running in this dashboard.")
+    a = b = c = d = st.container(horizontal=True)
+    if a.button("Resume", help="Run the episodes that are not finished yet.", disabled=running):
+        launch_run(root)
+    if exp.stage == "code":
+        if b.button("Evaluate pending", help="Score generated episodes with ServiceCraft.", disabled=running):
+            start("evaluate", label, run_cli, root, "evaluate", name)
+    elif b.button("Generate code", type="primary",
+                  help="Step 2: launch code generation from these designs."):
+        st.switch_page(LAUNCH, query_params={"step": "code", "designs": name})
+    if c.button("Stop", help="Stop now: kills the run's processes and Docker containers. Unfinished episodes "
+                "rerun on Resume."):
+        if jobs().stop(label):
+            st.toast(f"Stopping {name}…")
+        else:
+            # Nothing runs here (e.g. after a dashboard restart): clear what was left behind.
+            kill_run(None, root, log=lambda m: st.toast(m))
+        st.rerun()
+    # Keyed per experiment, so after a delete the next experiment's menu starts closed.
+    with d.popover("Delete", icon=":material/delete:", key=f"delete-menu-{name}"):
+        st.markdown(f"Delete **{name}** with all its {len(exp.episodes())} episodes, generated files and "
+                    "scores? This can't be undone.")
+        users = dependents(RUNS, name)
+        if users:
+            st.warning("Code experiments built on these designs can't be resumed afterwards: "
+                       + ", ".join(users))
+        if running:
+            st.info("Stop the experiment first.")
+        if st.button(f"Delete {name}", type="primary", disabled=running, key=f"delete-{name}"):
+            delete_experiment(root)
+            st.query_params.pop("exp", None)
+            st.session_state["list_version"] = st.session_state.get("list_version", 0) + 1
+            st.toast(f"Deleted {name}")
+            st.rerun()
 
     live_progress(root, name)
 
     st.subheader("Results")
     summary = results.summarize(root)
-    if summary:
+    if summary and exp.stage == "design":
+        df = pd.DataFrame(summary)
+        rate_cols = [c for c in df.columns if c == "valid_design" or c.startswith("design_")]
+        df[rate_cols] = df[rate_cols].apply(pd.to_numeric, errors="coerce")
+        table = pd.DataFrame({
+            "model": df["model"],
+            "finished": df["decided"].astype(str) + "/" + df["episodes"].astype(str),
+            "failed": df["generation_failed"], "infra": df["infra"],
+            "valid design": df["valid_design"] * 100,
+            "artifact coverage": df["design_artifact_coverage"] * 100,
+            "task recall": df["design_task_recall"] * 100,
+            "dependency recall": df["design_dependency_recall"] * 100,
+            "design correct": df["design_design_correct"] * 100,
+            "cost": [usd(v) + (" + ?" if inc else "") for v, inc in zip(df["cost_usd"], df["cost_incomplete"])],
+            "median time (s)": df["median_generation_s"],
+        })
+        percent = st.column_config.NumberColumn(format="%.1f%%")
+        st.dataframe(table, hide_index=True, width="stretch", column_config={
+            c: percent for c in ("valid design", "artifact coverage", "task recall", "dependency recall",
+                                 "design correct")})
+        st.caption("A valid design passes the structural check (every mandatory artifact written once, known "
+                   "inputs, no cycles). Comparison with the reference graph is provisional: tasks are matched "
+                   "by the artifacts they write. Averages are over valid designs.")
+    elif summary:
         df = pd.DataFrame(summary)
         # Missing rates become NaN, which the table shows as empty instead of "None".
-        rate_cols = [c for c in df.columns if c in results.SCORE_KEYS or c.startswith(("pass@", "design_"))]
+        rate_cols = [c for c in df.columns if c in results.SCORE_KEYS or c.startswith("pass@")]
         df[rate_cols] = df[rate_cols].apply(pd.to_numeric, errors="coerce")
         k = next((c for c in df.columns if c.startswith("pass@") and c != "pass@1"), None)
         table = pd.DataFrame({
-            "method": df["method"], "model": df["model"], "track": df["track"].str.replace("_", " "),
+            "method": df["method"], "model": df["model"],
+            "design": [{"reference": "reference", "own": "same episode"}.get(v, f"by {v}") for v in df["design"]],
             "finished": df["decided"].astype(str) + "/" + df["episodes"].astype(str),
             "gen. failed": df["generation_failed"], "infra": df["infra"],
             "executable": df["dagster_executable"] * 100, "outputs valid": df["output_contract_valid"] * 100,
@@ -154,33 +233,36 @@ def experiment_detail(name: str) -> None:
                            for m, s in zip(df["success_mean"], df["success_std"])],
             "pass@1": df["pass@1"] * 100,
             **({k: df[k] * 100} if k else {}),
-            "design correct": df["design_design_correct"] * 100,
-            "dependency recall": df["design_dependency_recall"] * 100,
             "cost": [usd(v) + (" + ?" if inc else "") for v, inc in zip(df["cost_usd"], df["cost_incomplete"])],
             "cost / success": [usd(v) for v in df["cost_per_success"]],
             "median time (s)": df["median_generation_s"],
         })
         percent = st.column_config.NumberColumn(format="%.1f%%")
         st.dataframe(table, hide_index=True, width="stretch", column_config={
-            c: percent for c in ("executable", "outputs valid", "behaviour", "complete success", "pass@1",
-                                 k, "design correct", "dependency recall") if c})
-        st.caption("Rates use every finished episode (generation failures count as failures); pending and "
-                   "infrastructure errors are left out. Design scores are provisional: tasks are matched "
-                   "to the reference graph by the artifacts they write.")
+            c: percent for c in ("executable", "outputs valid", "behaviour", "complete success", "pass@1", k) if c})
+        note = ("Rates use every finished episode (generation failures count as failures); pending and "
+                "infrastructure errors are left out.")
+        if exp.designs:
+            note += (" ServiceCraft's graph check expects the reference task names, so code from step-1 designs "
+                     "usually fails it; compare the later stages (execution, outputs, behaviour).")
+        st.caption(note)
 
     st.subheader("Episodes")
     rows = results.episodes(root)
-    query = st.text_input("Filter", placeholder="case, method, model, track or status").lower()
+    query = st.text_input("Filter", placeholder="case, method, model or status").lower()
     shown = [r for r in rows if not query or query in " ".join(
-        str(r.get(k, "")) for k in ("id", "method", "model", "track", "status")).lower()]
+        str(r.get(k, "")) for k in ("id", "method", "model", "design", "status")).lower()]
     table = pd.DataFrame([{
         "episode": r["id"], "status": f"{STATUS_ICON.get(r.get('status'), '')} {str(r.get('status', '')).replace('_', ' ')}",
-        **{label_: _score(r, key) for key, label_ in (("dagster_executable", "executable"),
+        **({} if exp.stage == "design" else {
+            label_: _score(r, key) for key, label_ in (("dagster_executable", "executable"),
                                                        ("output_contract_valid", "outputs"),
                                                        ("behaviorally_correct", "behaviour"),
-                                                       ("complete_success", "success"))},
-        "design": pct((r.get("design_score") or {}).get("dependency_recall")) if r.get("design_score") else "—",
-        "repairs": (r.get("counters") or {}).get("repairs"),
+                                                       ("complete_success", "success"))}),
+        **({"tasks matched": pct((r.get("design_score") or {}).get("task_recall")) if r.get("design_score") else "—",
+            "dependencies": pct((r.get("design_score") or {}).get("dependency_recall")) if r.get("design_score") else "—",
+            "design repairs": (r.get("counters") or {}).get("design_repairs")}
+           if exp.stage == "design" else {"repairs": (r.get("counters") or {}).get("repairs")}),
         "cost": usd((r.get("usage") or {}).get("cost_usd")),
         "time (s)": (r.get("budget") or {}).get("elapsed_s"),
         "error": r.get("error") or "",
@@ -206,7 +288,7 @@ def _score(row: dict, key: str) -> str:
 def live_progress(root: Path, name: str) -> None:
     snap = snapshot(root)
     counts, total = snap["counts"], snap["total"]
-    finished = counts.get("evaluated", 0) + counts.get("generation_failed", 0)
+    finished = sum(counts.get(k, 0) for k in FINISHED)
     st.progress(finished / total if total else 0.0,
                 text=f"{finished}/{total} finished · " + " · ".join(
                     f"{k.replace('_', ' ')} {v}" for k, v in sorted(counts.items())))
@@ -228,25 +310,43 @@ def live_progress(root: Path, name: str) -> None:
 def episode_detail(root: Path, episode_id: str) -> None:
     ep_dir = root / "episodes" / episode_id
     state = episode_state(ep_dir) or {}
+    is_design = Experiment.load(root).stage == "design"
     st.markdown(f"#### `{episode_id}`")
     if state.get("error"):
         st.error(state["error"])
-    cols = st.columns(4)
+    cols = st.columns(3 if is_design else 4)
     cols[0].markdown("**Status**\n\n" + f"{STATUS_ICON.get(state.get('status'), '')} {state.get('status', '—')}")
-    stages = state.get("stages") or {}
-    cols[1].markdown("**ServiceCraft stages**\n\n" + ("\n".join(
-        f"- {k}: {'✅' if v == 'pass' else '❌'} {v}" for k, v in stages.items()) or "—"))
     usage = state.get("usage") or {}
-    cols[2].markdown("**Usage**\n\n" + (f"- requests {usage.get('requests')} ({usage.get('failed_requests')} failed)\n"
+    cols[1].markdown("**Usage**\n\n" + (f"- requests {usage.get('requests')} ({usage.get('failed_requests')} failed)\n"
                                         f"- input {usage.get('input_tokens')} · output {usage.get('output_tokens')}\n"
                                         f"- cost {usd(usage.get('cost_usd'))}" + (" + ?" if usage.get("cost_unavailable") else "")
                                         if usage else "—"))
-    counters = state.get("counters") or {}
-    cols[3].markdown("**Counters**\n\n" + ("\n".join(f"- {k} {v}" for k, v in counters.items()) or "—"))
-    if state.get("design_score"):
-        with st.expander("Design compared with the reference (provisional)", expanded=True):
-            st.json(state["design_score"])
+    counters = {k: v for k, v in (state.get("counters") or {}).items()
+                if not is_design or k.startswith("design") or k == "model_requests"}
+    cols[2].markdown("**Counters**\n\n" + ("\n".join(f"- {k.replace('_', ' ')} {v}" for k, v in counters.items())
+                                             or "—"))
+    if not is_design:
+        stages = state.get("stages") or {}
+        cols[3].markdown("**ServiceCraft stages**\n\n" + ("\n".join(
+            f"- {k}: {'✅' if v == 'pass' else '❌'} {v}" for k, v in stages.items()) or "—"))
+    score = state.get("design_score")
+    if score:
+        st.markdown("**Compared with the reference graph** (provisional)")
+        m = st.columns(5)
+        m[0].metric("Tasks", f"{score.get('design_tasks')} vs {score.get('reference_tasks')}")
+        m[1].metric("Artifact coverage", pct(score.get("artifact_coverage")))
+        m[2].metric("Tasks matched", pct(score.get("task_recall")))
+        m[3].metric("Dependencies", pct(score.get("dependency_recall")))
+        m[4].metric("Design correct", "yes" if score.get("design_correct") else "no")
+        missing = score.get("missing_dependencies") or []
+        if missing:
+            st.caption("Missing dependencies (reference task names): " + ", ".join(f"`{d}`" for d in missing))
 
+    design_file = ep_dir / "work" / "design.json"
+    if design_file.is_file():
+        source = (f" (step 1 episode `{state['design_episode']}`)" if state.get("design_episode") else "")
+        with st.expander(f"Pipeline design{source}", expanded=is_design):
+            st.graphviz_chart(design_dot(json.loads(design_file.read_text())), width="stretch")
     project = ep_dir / "work" / "project.json"
     if project.is_file():
         st.download_button("Download Project JSON for inLUMEN", project.read_bytes(),
@@ -254,7 +354,8 @@ def episode_detail(root: Path, episode_id: str) -> None:
 
     files = sorted(str(p.relative_to(ep_dir)) for p in ep_dir.rglob("*")
                    if p.is_file() and "inputs" not in p.relative_to(ep_dir).parts)
-    default = next((i for i, f in enumerate(files) if f == "submission/definitions.py"), 0)
+    wanted = "work/design.json" if is_design else "submission/definitions.py"
+    default = next((i for i, f in enumerate(files) if f == wanted), 0)
     path = st.selectbox("File", files, index=default, key=f"file-{episode_id}")
     target = ep_dir / path
     if target.stat().st_size > 2_000_000:
@@ -277,18 +378,44 @@ def launch_page() -> None:
     if not c.exists():
         st.warning("Fetch the dataset on the Corpus page first.")
         return
+    wanted_step = st.query_params.get("step", "design")
+    step = st.segmented_control("Step", ["design", "code"], format_func=STEP_LABEL.get, required=True,
+                                default=wanted_step if wanted_step in STEP_LABEL else "design")
+    if step == "design":
+        st.caption("The model turns each case's prompt into a pipeline design (a task graph). Designs are checked "
+                   "and compared with ServiceCraft's reference graph; nothing is executed. Use good designs for "
+                   "step 2.")
+    else:
+        st.caption("The model writes Dagster code for a design, and ServiceCraft runs and scores it. The design is "
+                   "ServiceCraft's reviewed reference graph, or one made in step 1.")
+
     registry = {e["case_id"]: e for e in c.registry()["cases"]}
     cases = [{"id": cid, "number": cid[:3], "topology": registry.get(cid, {}).get("topology"),
               "category": "A" if int(cid[:3]) <= 13 else "B"} for cid in c.case_ids()]
 
     left, right = st.columns(2)
-    name = left.text_input("Name", placeholder="pilot-1")
-    reps = right.number_input("Repetitions per model", min_value=1, max_value=50, value=3)
-    methods = left.multiselect("Methods", list(METHODS), default=["inlumen"],
-                               help="  \n".join(f"**{m.name}**: {_summary(m)}" for m in METHODS.values()))
-    tracks = right.multiselect("Tracks", ["fixed_graph", "natural_language"], default=["fixed_graph"],
-                               format_func=lambda t: {"fixed_graph": "fixed graph (code generation)",
-                                                      "natural_language": "natural language (design + code)"}[t])
+    name = left.text_input("Name", placeholder="designs-1" if step == "design" else "code-1")
+    reps = right.number_input("Repetitions per model" + (" and design" if step == "code" else ""),
+                              min_value=1, max_value=50, value=3 if step == "design" else 1)
+
+    source, designs, methods = REFERENCE, [], []
+    if step == "code":
+        sources = [REFERENCE, *design_experiments()]
+        wanted = st.query_params.get("designs")
+        source = left.selectbox(
+            "Designs", sources, index=sources.index(wanted) if wanted in sources else 0,
+            format_func=lambda n: "Reference designs (ServiceCraft's reviewed graphs)" if n == REFERENCE
+            else f"From {n} (step 1)")
+        methods = right.multiselect("Methods", list(METHODS), default=["inlumen"],
+                                    help="  \n".join(f"**{m.name}**: {_summary(m)}" for m in METHODS.values()))
+        if source != REFERENCE:
+            available = successful_designs(RUNS / source)
+            design_models = sorted({d["model"] for d in available})
+            picked = st.multiselect("Designs by", design_models, default=design_models,
+                                    help="Use only the designs these models made in step 1.")
+            designs = [d for d in available if d["model"] in picked]
+            if not available:
+                st.warning(f"{source} has no valid designs yet.")
 
     st.subheader("Models")
     known = st.session_state.setdefault("model_options", [])
@@ -306,36 +433,59 @@ def launch_page() -> None:
                             placeholder="Pick from the loaded list or type profile:model")
 
     st.subheader("Cases")
-    topologies = sorted({x["topology"] for x in cases if x["topology"]})
-    presets = ["Pilot: 10 cases across categories and topologies", f"All {len(cases)} cases",
-               "Category A (rich domains, 001–013)", "Category B (sports and transportation)",
-               *[f"Topology: {t.replace('_', ' ')}" for t in topologies], "Custom list"]
-    preset = st.selectbox("Selection", presets)
-    numbers = _pick_cases(preset, cases, topologies)
-    if preset == "Custom list":
-        typed = st.text_input("Case numbers", placeholder="001, 016, 055")
-        numbers = [x for x in typed.replace(",", " ").split() if x]
+    if source != REFERENCE:
+        with_design = sorted({d["case_id"][:3] for d in designs})
+        typed = st.text_input("Case numbers (empty: every case with a design)", placeholder="001, 016")
+        chosen = [x for x in typed.replace(",", " ").split() if x]
+        numbers = [n for n in with_design if not chosen or n in chosen]
+        designs = [d for d in designs if d["case_id"][:3] in numbers]
+        st.caption(f"{len(designs)} designs over {len(numbers)} cases: {', '.join(numbers) or '—'}")
     else:
-        st.caption(", ".join(numbers))
+        topologies = sorted({x["topology"] for x in cases if x["topology"]})
+        presets = ["Pilot: 10 cases across categories and topologies", f"All {len(cases)} cases",
+                   "Category A (rich domains, 001–013)", "Category B (sports and transportation)",
+                   *[f"Topology: {t.replace('_', ' ')}" for t in topologies], "Custom list"]
+        preset = st.selectbox("Selection", presets)
+        numbers = _pick_cases(preset, cases, topologies)
+        if preset == "Custom list":
+            typed = st.text_input("Case numbers", placeholder="001, 016, 055")
+            numbers = [x for x in typed.replace(",", " ").split() if x]
+        else:
+            st.caption(", ".join(numbers))
 
     st.subheader("Limits per episode")
     l1, l2, l3, l4, l5 = st.columns(5)
-    max_cost = l1.number_input("Max cost (USD)", min_value=0.0, value=2.0, step=0.5)
-    max_seconds = l2.number_input("Max time (s)", min_value=60, value=1800, step=60)
-    max_requests = l3.number_input("Max model requests", min_value=1, value=60)
-    max_repairs = l4.number_input("Max repairs (inlumen)", min_value=0, max_value=10, value=3)
+    max_cost = l1.number_input("Max cost (USD)", min_value=0.0, value=2.0 if step == "code" else 0.5, step=0.5)
+    max_seconds = l2.number_input("Max time (s)", min_value=60, value=1800 if step == "code" else 600, step=60)
+    max_requests = l3.number_input("Max model requests", min_value=1, value=60 if step == "code" else 5)
+    if step == "design":
+        repairs = l4.number_input("Max design repairs", min_value=0, max_value=10, value=2,
+                                  help="Times a design with structural problems is sent back to the model.")
+    else:
+        repairs = l4.number_input("Max repairs (inlumen)", min_value=0, max_value=10, value=3)
     workers = l5.number_input("Episodes in parallel", min_value=1, max_value=32, value=2)
     seed = st.number_input("Random seed for the run order", value=0)
-    evaluate = st.checkbox("Score with ServiceCraft when generation ends", value=True)
+    evaluate = step == "code" and st.checkbox("Score with ServiceCraft when generation ends", value=True)
 
-    episodes = len(numbers) * len(methods) * len(models) * len(tracks) * int(reps)
-    st.info(f"{len(numbers)} cases × {len(methods)} methods × {len(models)} models × {len(tracks)} tracks × "
-            f"{int(reps)} repetitions = **{episodes} episodes**")
+    if step == "design":
+        units, count = f"{len(numbers)} cases", len(numbers)
+        episodes = count * len(models) * int(reps)
+        st.info(f"{units} × {len(models)} models × {int(reps)} repetitions = **{episodes} designs**")
+    else:
+        units, count = ((f"{len(designs)} designs", len(designs)) if source != REFERENCE
+                        else (f"{len(numbers)} cases", len(numbers)))
+        episodes = count * len(methods) * len(models) * int(reps)
+        st.info(f"{units} × {len(methods)} methods × {len(models)} models × {int(reps)} repetitions = "
+                f"**{episodes} episodes**")
+        if source != REFERENCE:
+            st.caption("ServiceCraft's graph check expects the reference task names, so code from step-1 designs "
+                       "usually fails it even when it runs correctly; the later stages are still scored.")
     if st.button("Start experiment", type="primary"):
         import re
         error = ("Enter a name using letters, digits, dots, dashes or underscores." if not re.match(NAME_RE, name)
-                 else "Pick at least one method." if not methods else "Pick at least one track." if not tracks
-                 else "Add at least one model." if not models else "Pick at least one case." if not numbers else "")
+                 else "Pick at least one method." if step == "code" and not methods
+                 else "Add at least one model." if not models
+                 else "Pick at least one case." if not count else "")
         bad = [m for m in models if ":" not in m or m.split(":", 1)[0] not in profiles]
         if not error and bad:
             error = f"Use profile:model with a known profile: {', '.join(bad)}"
@@ -343,17 +493,23 @@ def launch_page() -> None:
             st.error(error)
             return
         root = RUNS / name
-        options = {m: {"max_repairs": int(max_repairs)} for m in methods if m != "direct"}
+        limits = {"max_cost_usd": float(max_cost), "max_seconds": float(max_seconds),
+                  "max_requests": int(max_requests)}
         try:
-            create_experiment(root, c, name=name, cases=c.resolve_cases(numbers), methods=methods, models=models,
-                              tracks=tracks, repetitions=int(reps), seed=int(seed),
-                              limits={"max_cost_usd": float(max_cost), "max_seconds": float(max_seconds),
-                                      "max_requests": int(max_requests)}, method_options=options)
+            if step == "design":
+                create_experiment(root, c, stage="design", name=name, cases=c.resolve_cases(numbers),
+                                  models=models, repetitions=int(reps), seed=int(seed), limits=limits,
+                                  method_options={"inlumen": {"design_repairs": int(repairs)}})
+            else:
+                options = {m: {"max_repairs": int(repairs)} for m in methods if m != "direct"}
+                create_experiment(root, c, stage="code", design_from=source,
+                                  design_models=sorted({d["model"] for d in designs}) or None, name=name,
+                                  cases=c.resolve_cases(numbers), methods=methods, models=models,
+                                  repetitions=int(reps), seed=int(seed), limits=limits, method_options=options)
         except (FileExistsError, ValueError, KeyError, CorpusError) as exc:
             st.error(str(exc).strip("'\""))
             return
-        start("experiment", f"exp:{name}", run_job, root, int(workers), evaluate)
-        st.query_params["exp"] = name
+        launch_run(root, int(workers), evaluate)
         st.switch_page(EXPERIMENTS, query_params={"exp": name})
 
 
@@ -534,7 +690,7 @@ def case_browser(c: Corpus) -> None:
 
 
 def case_detail(c: Corpus, case_id: str) -> None:
-    from inlumen_bench.design import edges, from_task_graph, to_project_json
+    from inlumen_bench.design import from_task_graph, to_project_json
     case_dir = c.root / "corpus/pipelines" / case_id
     graph = json.loads((case_dir / "task_graph.json").read_text())
     st.subheader(f"{case_id[:3]} · {graph.get('title', '')}")
@@ -549,20 +705,11 @@ def case_detail(c: Corpus, case_id: str) -> None:
     prompt_tab, graph_tab, tasks_tab, inputs_tab, desc_tab = st.tabs(
         ["Prompt", "Pipeline", "Tasks", "Input data", "Description"])
     with prompt_tab:
-        st.caption("What every method receives, on both tracks.")
+        st.caption("What every method receives, in both steps.")
         st.code(c.prompt(case_id), language=None, wrap_lines=True)
     with graph_tab:
-        st.caption("The reference task graph. Methods see it only on the fixed-graph track.")
-        lines = ['digraph { rankdir=LR; node [fontname="Helvetica" fontsize=11]; edge [fontname="Helvetica" fontsize=9];']
-        for i in graph["inputs"]:
-            lines.append(f'"{i["id"]}" [shape=note label="{i["path"].split("/")[-1]}" style=filled fillcolor="#eef3f8"];')
-        for t in graph["tasks"]:
-            lines.append(f'"{t["id"]}" [shape=box style="rounded,filled" fillcolor="#dbe7f3" label="{t["id"]}"];')
-            for item in t.get("inputs", []):
-                if item.startswith("input:"):
-                    lines.append(f'"{item}" -> "{t["id"]}";')
-        lines += [f'"{a}" -> "{b}" [label="{art}"];' for a, b, art in edges(design)]
-        st.graphviz_chart("\n".join(lines + ["}"]), width="stretch")
+        st.caption("The reference task graph. Methods see it only in step 2 with reference designs.")
+        st.graphviz_chart(design_dot(design), width="stretch")
     with tasks_tab:
         st.dataframe(pd.DataFrame([{
             "task": t["id"], "name": t.get("name", ""), "operation": t.get("operation", ""),
