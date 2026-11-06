@@ -200,15 +200,35 @@ def test_runs_go_one_model_at_a_time_in_random_order_within_each():
 def test_model_queue_keeps_each_model_with_one_worker():
     from inlumen_bench.runner import ModelQueue
 
-    runs = [{"id": f"{m}{i}", "model": m} for m in ("a", "b", "c") for i in range(2)]
+    runs = [{"id": f"{m}{i}", "model": f"p:{m}"} for m in ("a", "b", "c") for i in range(2)]
     q = ModelQueue(runs, per_model=1)
-    first, second = q.take(), q.take()
-    assert (first["model"], second["model"]) == ("a", "b")  # two workers, two models (two GPUs)
+    first, second = q.take()[0], q.take()[0]
+    assert (first["model"], second["model"]) == ("p:a", "p:b")  # two workers, two models
     assert q.take() is not None and q.take() is None  # "c" goes to a third worker; nothing else is free
-    assert q.release(first) is False and q.take(prefer="a")["id"] == "a1"  # a worker keeps its model
-    assert q.release({"model": "a"}) is True  # a's last run: time to unload it
+    assert q.release(first) is None and q.take(prefer="p:a")[0]["id"] == "a1"  # a worker keeps its model
+    assert q.release({"model": "p:a"}) == [None]  # a's last run: unload it from the base URL
     two = ModelQueue(runs, per_model=2)
-    assert [two.take()["model"] for _ in range(3)] == ["a", "a", "b"]
+    assert [two.take()[0]["model"] for _ in range(3)] == ["p:a", "p:a", "p:b"]
+
+
+def test_model_queue_runs_each_model_on_every_gpu_server():
+    from inlumen_bench.runner import ModelQueue
+
+    runs = [{"id": f"{m}{i}", "model": f"ollama:{m}"} for m in ("a", "b") for i in range(3)]
+    gpu0, gpu1 = "http://127.0.0.1:11435/v1", "http://127.0.0.1:11436/v1"
+    q = ModelQueue(runs, per_model=1, endpoints={"ollama": [gpu0, gpu1]})
+    a0, a1 = q.take(), q.take()
+    assert (a0[0]["model"], a0[1], a1[0]["model"], a1[1]) == ("ollama:a", gpu0, "ollama:a", gpu1)  # both GPUs
+    assert q.take() is None  # each server runs one request at a time
+    assert q.release(a0[0], gpu0) is None
+    a2 = q.take(prefer="ollama:a", lane=gpu0)
+    assert a2[0]["id"] == "a2" and a2[1] == gpu0 and a2[2] is None  # same model, same GPU: nothing to unload
+    assert q.release(a1[0], gpu1) is None
+    b0 = q.take(prefer="ollama:a", lane=gpu1)  # a has no runs left: the free GPU moves on to b
+    assert (b0[0]["model"], b0[1], b0[2]) == ("ollama:b", gpu1, "ollama:a")  # after unloading a there
+    assert q.release(a2[0], gpu0) == [gpu0]  # a's last run: unload it where it is still loaded
+    b1 = q.take(prefer="ollama:a", lane=gpu0)
+    assert (b1[0]["model"], b1[1], b1[2]) == ("ollama:b", gpu0, None)
 
 
 def test_run_experiment_runs_models_side_by_side(tmp_path, monkeypatch):
@@ -225,7 +245,7 @@ def test_run_experiment_runs_models_side_by_side(tmp_path, monkeypatch):
     lock = threading.Lock()
     unloaded = []
 
-    def fake_run(root, corpus, exp, ep, profiles, limits):
+    def fake_run(root, corpus, exp, ep, profiles, limits, endpoint=None):
         with lock:
             live[ep["model"]] = live.get(ep["model"], 0) + 1
             peak["models"] = max(peak["models"], sum(1 for n in live.values() if n))
@@ -236,10 +256,46 @@ def test_run_experiment_runs_models_side_by_side(tmp_path, monkeypatch):
 
     monkeypatch.setattr(runner, "run_episode", fake_run)
     monkeypatch.setattr(runner, "load_profiles", dict)
-    monkeypatch.setattr(runner, "unload_model", lambda profiles, model, log: unloaded.append(model))
+    monkeypatch.setattr(runner, "unload_model", lambda profiles, model, log, url=None, **kw: unloaded.append(model))
     runner.run_experiment(tmp_path, corpus=None, workers=2)
     assert peak == {"models": 2, "same": 1}
     assert sorted(unloaded) == ["p:a", "p:b", "p:c"]
+
+
+def test_run_experiment_keeps_every_gpu_server_busy(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    from inlumen_bench import runner
+    from inlumen_bench.providers import Profile
+
+    servers = ["http://127.0.0.1:11435/v1", "http://127.0.0.1:11436/v1"]
+    profiles = {"ollama": Profile(name="ollama", base_url="http://127.0.0.1:11434/v1", endpoints=servers)}
+    exp = Experiment(name="gpus", cases=["016_x", "001_y"], methods=["inlumen"],
+                     models=["ollama:big", "ollama:small"], tracks=["fixed_graph"], repetitions=3)
+    exp.save(tmp_path)
+    busy: dict[str, str] = {}
+    seen = []
+    lock = threading.Lock()
+    unloaded = []
+
+    def fake_run(root, corpus, exp, ep, profiles, limits, endpoint=None):
+        with lock:
+            assert endpoint in servers and endpoint not in busy  # one run per server at a time
+            busy[endpoint] = ep["model"]
+            seen.append(tuple(sorted(busy.values())))
+        time.sleep(0.01 if ep["model"] == "ollama:small" else 0.03)
+        with lock:
+            del busy[endpoint]
+
+    monkeypatch.setattr(runner, "run_episode", fake_run)
+    monkeypatch.setattr(runner, "load_profiles", lambda: profiles)
+    monkeypatch.setattr(runner, "unload_model",
+                        lambda profiles, model, log, url=None, **kw: unloaded.append((model, url)))
+    runner.run_experiment(tmp_path, corpus=None, workers=2)
+    assert ("ollama:big", "ollama:big") in seen  # the same model on both GPUs at once
+    assert len(seen) == 12 and {m for m, _ in unloaded} == {"ollama:big", "ollama:small"}
+    assert all(url in servers for _, url in unloaded)
 
 
 def test_progress_shows_waiting_time_model_and_missing_cost():

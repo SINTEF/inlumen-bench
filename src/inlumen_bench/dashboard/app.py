@@ -558,7 +558,7 @@ def live_progress(root: Path, name: str) -> None:
         column.metric(label, value)
     if snap["active"]:
         st.dataframe(pd.DataFrame(snap["active"]).rename(columns={"episode": "run", "step": "activity"}),
-                     column_order=["run", "model", "phase", "activity", "request", "budget", "elapsed_s"],
+                     column_order=["run", "model", "server", "phase", "activity", "request", "budget", "elapsed_s"],
                      hide_index=True, width="stretch",
                      column_config={"elapsed_s": st.column_config.NumberColumn("time (s)", format="%.0f")})
     job = jobs().running_for(f"exp:{name}") or jobs().last_for(f"exp:{name}")
@@ -918,16 +918,25 @@ def launch_page() -> None:
     st.subheader(f"{5 if phase == 'design' else 6} · Replicates and limits")
     a, b, pm, w = st.columns(4)
     reps = a.number_input("Replicates", 1, 50, 5, help="Repetitions of each case × method × model × condition.")
-    workers = b.number_input("Runs in parallel", 1, 32, 2,
-                             help="Runs at the same time. Models run one after another; with one run per model "
-                                  "at a time, parallel runs go to different models (each on its own GPU with "
-                                  "a local Ollama).")
+    lanes = sum(len(profiles[n].run_endpoints) for n in {m.partition(":")[0] for m in models}
+                if n in profiles)
+    workers = b.number_input("Runs in parallel", 1, 32, max(2, lanes),
+                             help="Runs at the same time. With a profile that has one Ollama server per GPU "
+                                  "(endpoints), set this to the number of servers: every GPU runs a model, and "
+                                  "the same model can run on all of them. Otherwise parallel runs go to "
+                                  "different models.")
     per_model = pm.number_input("Runs per model at a time", 1, 32, 1,
-                                help="1 for a local server: Ollama answers one request per model at a time, so "
-                                     "more runs of one model only wait, and the wait counts as their time. "
+                                help="Per server: 1 for Ollama, which answers one request per model at a time, "
+                                     "so more runs only wait, and the wait counts as their time. "
                                      "Hosted APIs (OpenRouter) can take more.")
     seed = w.number_input("Seed for the run order", value=0)
-    if models and int(workers) > len(models) * int(per_model):
+    if lanes:
+        st.caption(f"{lanes} Ollama servers side by side (one per GPU): models run one after another, "
+                   f"each on all of them.")
+        if int(workers) != lanes * int(per_model):
+            st.caption(f":orange[Set runs in parallel to {lanes * int(per_model)} to keep every server busy "
+                       f"without queueing.]")
+    elif models and int(workers) > len(models) * int(per_model):
         st.caption(f":orange[Only {len(models) * int(per_model)} of the {int(workers)} parallel runs can be busy: "
                    f"{len(models)} model{'s' if len(models) != 1 else ''} × {int(per_model)} run(s) per model.]")
     with st.expander("Limits per run", icon=":material/tune:"):
@@ -1022,7 +1031,7 @@ def models_page() -> None:
     profiles = load_profiles()
     if profiles:
         st.dataframe(pd.DataFrame([{
-            "name": p.name, "base url": p.base_url,
+            "name": p.name, "base url": p.base_url, "servers for runs": ", ".join(p.run_endpoints) or "base url",
             "api key": f"env:{p.api_key_env}" if p.api_key_env else (p.masked()["api_key"] or "none"),
             "parallel": p.max_parallel, "timeout (s)": p.timeout_s, "stall (s)": p.stall_s,
         } for p in profiles.values()]), hide_index=True, width="stretch")
@@ -1072,8 +1081,13 @@ def models_page() -> None:
                             placeholder="unchanged" if existing and existing.api_key else "leave empty for local servers")
         key_env = f2.text_input("Or read the key from this environment variable",
                                 value=base.get("api_key_env") or "", placeholder="OPENROUTER_API_KEY")
+        servers = st.text_input(
+            "Servers for runs (optional, one per GPU)", value=", ".join(base.get("endpoints") or []),
+            placeholder="http://127.0.0.1:11435/v1, http://127.0.0.1:11436/v1",
+            help="Several servers with the same models, used side by side: runs go to these instead of "
+                 "the base URL. Start one Ollama per GPU with scripts/ollama-gpus.")
         g1, g2, g3 = st.columns(3)
-        parallel = g1.number_input("Parallel requests", min_value=1, value=int(base.get("max_parallel", 4)))
+        parallel = g1.number_input("Parallel requests per server", min_value=1, value=int(base.get("max_parallel", 4)))
         timeout = g2.number_input("Timeout (s)", min_value=1, value=int(base.get("timeout_s", 600)))
         stall = g3.number_input("Stall warning after (s without data)", min_value=1, value=int(base.get("stall_s", 120)))
         if st.form_submit_button("Save profile", type="primary"):
@@ -1087,7 +1101,8 @@ def models_page() -> None:
                     api_key=key or (existing.api_key if existing else None),
                     api_key_env=key_env.strip() or None,
                     headers=existing.headers if existing else {},
-                    max_parallel=int(parallel), timeout_s=float(timeout), stall_s=float(stall)))
+                    max_parallel=int(parallel), timeout_s=float(timeout), stall_s=float(stall),
+                    endpoints=[u.strip() for u in servers.replace(",", " ").split() if u.strip()]))
                 st.toast(f"Saved {name}")
                 st.rerun()
     if existing and st.button(f"Remove {existing.name}", type="secondary"):

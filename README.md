@@ -109,14 +109,29 @@ the model's files:
 curl -s localhost:11434/api/create -d '{"model": "qwen3.8-32k", "from": "qwen3.8:latest", "parameters": {"num_ctx": 32768}}'
 ```
 An experiment runs each model's runs in random order, and by default at most one run
-per model at a time ("Runs per model at a time", `--runs-per-model`): Ollama answers one
-request per model at a time, so more runs of one model would only wait, and the wait
-would count as their time. Parallel runs ("Runs in parallel", `--workers`) therefore go
-to different models; Ollama puts each model on its own GPU when it fits, so two runs in
-parallel use two GPUs. When a model has no runs left, the bench asks Ollama to unload
-it, so the next model gets its GPU. Set the profile's parallel requests to at least the
-number of runs in parallel, or the requests queue in the bench instead. With hosted
-APIs, raise the runs per model.
+per model at a time on each server ("Runs per model at a time", `--runs-per-model`):
+Ollama answers one request per model at a time, so more runs of one model would only
+wait, and the wait would count as their time.
+
+With several GPUs, start one Ollama server per GPU, so the same model can run on all of
+them at once and no GPU waits while another model finishes:
+```sh
+scripts/ollama-gpus start    # a server per GPU on ports 11435, 11436, ...; also stop, status
+```
+They run as your user (no sudo), see one GPU each, hold one model at a time and read the
+system Ollama's models (read only). They keep running after you log out, not after a
+reboot. Then list them as the profile's servers for runs (Models page, or
+`bench providers add ollama --preset ollama --endpoint http://127.0.0.1:11435/v1 --endpoint
+http://127.0.0.1:11436/v1`), and set "Runs in parallel" (`--workers`) to the number of
+servers. Models then run one after another, each on every GPU; when a server moves on to
+the next model, or a model has no runs left, the bench unloads it there. Each run records
+its server, and the dashboard shows it. Other users of the system Ollama (port 11434) can
+still load models onto these GPUs.
+
+Without servers for runs, parallel runs go to different models instead: Ollama puts each
+model on its own GPU when it fits, but the last model runs alone on one GPU. Set the
+profile's parallel requests (per server) to at least the runs per model, or requests
+queue in the bench. With hosted APIs, raise the runs per model.
 
 Progress: the dashboard shows each running run's model, phase and request (with how
 long it has been waiting), and the experiment's log is kept in

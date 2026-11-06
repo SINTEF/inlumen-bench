@@ -31,11 +31,12 @@ _semaphores_lock = threading.Lock()
 
 
 def _profile_slot(profile: Profile) -> threading.BoundedSemaphore:
-    """Caps concurrent requests per endpoint profile across all episodes."""
+    """Caps concurrent requests per server (profile and URL) across all episodes."""
+    key = f"{profile.name} {profile.base_url}"
     with _semaphores_lock:
-        if profile.name not in _semaphores:
-            _semaphores[profile.name] = threading.BoundedSemaphore(max(1, profile.max_parallel))
-        return _semaphores[profile.name]
+        if key not in _semaphores:
+            _semaphores[key] = threading.BoundedSemaphore(max(1, profile.max_parallel))
+        return _semaphores[key]
 
 
 class LLMError(Exception):

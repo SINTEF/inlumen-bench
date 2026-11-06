@@ -198,15 +198,19 @@ def snapshot(root: Path) -> dict:
     exp = Experiment.load(root)
     tracker = ProgressTracker(0, exp.name, bus=Bus())
     counts: dict[str, int] = {}
+    servers: dict[str, str] = {}
     for ep in exp.episodes():
         ep_dir = root / "episodes" / ep["id"]
         state = episode_state(ep_dir) or {"status": "pending"}
         counts[state["status"]] = counts.get(state["status"], 0) + 1
         if state["status"] == "running":
+            if state.get("endpoint"):
+                servers[ep["id"]] = state["endpoint"].split("//")[-1].removesuffix("/v1")
             for event in read_events(ep_dir / "events.jsonl"):
                 tracker.on_event(event)
     now = time.monotonic()
-    active = [{"episode": v.episode_id, "model": v.model, "phase": v.phase, "step": v.detail,
+    active = [{"episode": v.episode_id, "model": v.model, "server": servers.get(v.episode_id, ""),
+               "phase": v.phase, "step": v.detail,
                "request": request_text(v, now), "budget": v.budget, "elapsed_s": round(now - v.started, 1)}
               for v in tracker.active.values()]
     return {"total": len(exp.episodes()), "counts": counts, "active": active}
