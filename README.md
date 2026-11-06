@@ -101,13 +101,16 @@ Then `docker compose up -d --build` on the server, and from your own computer:
 ```sh
 ssh -N -L 8501:127.0.0.1:8501 you@server   # dashboard on http://localhost:8501
 ```
-To publish it on the web instead, run a Cloudflare Tunnel on the server (its own
-compose project, shared by every app there) with a route to `http://127.0.0.1:8501`,
-and put a Cloudflare Access login in front of that hostname first.
-
-For Ollama, prefer models with a long enough context (the `-16k` variants on a shared
-server, or `OLLAMA_CONTEXT_LENGTH` on your own); the default context silently cuts
-long prompts. Set the profile's parallel requests to what the server allows.
+For Ollama, give every model the same fixed context. Without one, a model gets either
+Ollama's default (which silently cuts long prompts) or its full trained context (262k
+tokens for some), which takes far more GPU memory. A copy with a fixed context reuses
+the model's files:
+```sh
+curl -s localhost:11434/api/create -d '{"model": "qwen3.8-32k", "from": "qwen3.8:latest", "parameters": {"num_ctx": 32768}}'
+```
+An experiment runs its models one after another (in random order within each model),
+so a local server holds one model at a time. Set the profile's parallel requests to
+what the server allows.
 
 ## Native install
 Python 3.11+ (or [uv](https://docs.astral.sh/uv/)) and a running Docker engine.

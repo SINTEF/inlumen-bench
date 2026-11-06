@@ -171,8 +171,12 @@ class Experiment:
                                 add({"case_id": case, "method": method, "model": model, "track": track,
                                      "design": REFERENCE if track == "fixed_graph" else "own"},
                                     f"{case[:3]}-{method}-{ref.slug}-{TRACK_SHORT[track]}", rep)
-        # Random order spreads order effects (cache warmth, rate limits) over cells.
+        # One model at a time, in random order within each model: random order spreads order
+        # effects (cache warmth, rate limits) over cells, while interleaving models would make a
+        # local server (Ollama) keep several loaded at once, pushing some off the GPU and timing
+        # model loads instead of runs.
         random.Random(self.seed).shuffle(out)
+        out.sort(key=lambda ep: self.models.index(ep["model"]) if ep["model"] in self.models else len(self.models))
         return out
 
 

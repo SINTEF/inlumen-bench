@@ -182,3 +182,16 @@ def test_deleted_runs_become_pending(tmp_path):
     assert {r["status"] for r in episodes(root)} == {"pending", "evaluated"}
     with pytest.raises(ValueError):
         delete_runs(root, ["not-a-run"])
+
+
+def test_runs_go_one_model_at_a_time_in_random_order_within_each():
+    exp = Experiment(name="m", cases=["016_x", "001_y", "002_z"], methods=["inlumen", "direct"],
+                     models=["p:b", "p:a"], tracks=["fixed_graph"], repetitions=2, seed=3)
+    runs = exp.episodes()
+    models = [r["model"] for r in runs]
+    assert models == ["p:b"] * 12 + ["p:a"] * 12  # in the order given, never interleaved
+    first = [r["id"] for r in runs[:12]]
+    assert first != sorted(first) and first == [r["id"] for r in exp.episodes()[:12]]  # shuffled, reproducibly
+    design = Experiment(name="d", stage="design", cases=["016_x", "001_y"], methods=["inlumen"],
+                        models=["p:a", "p:b"], tracks=["natural_language"], repetitions=3)
+    assert [r["model"] for r in design.episodes()] == ["p:a"] * 6 + ["p:b"] * 6
