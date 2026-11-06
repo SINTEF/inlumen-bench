@@ -195,3 +195,73 @@ def test_runs_go_one_model_at_a_time_in_random_order_within_each():
     design = Experiment(name="d", stage="design", cases=["016_x", "001_y"], methods=["inlumen"],
                         models=["p:a", "p:b"], tracks=["natural_language"], repetitions=3)
     assert [r["model"] for r in design.episodes()] == ["p:a"] * 6 + ["p:b"] * 6
+
+
+def test_model_queue_keeps_each_model_with_one_worker():
+    from inlumen_bench.runner import ModelQueue
+
+    runs = [{"id": f"{m}{i}", "model": m} for m in ("a", "b", "c") for i in range(2)]
+    q = ModelQueue(runs, per_model=1)
+    first, second = q.take(), q.take()
+    assert (first["model"], second["model"]) == ("a", "b")  # two workers, two models (two GPUs)
+    assert q.take() is not None and q.take() is None  # "c" goes to a third worker; nothing else is free
+    assert q.release(first) is False and q.take(prefer="a")["id"] == "a1"  # a worker keeps its model
+    assert q.release({"model": "a"}) is True  # a's last run: time to unload it
+    two = ModelQueue(runs, per_model=2)
+    assert [two.take()["model"] for _ in range(3)] == ["a", "a", "b"]
+
+
+def test_run_experiment_runs_models_side_by_side(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    from inlumen_bench import runner
+
+    exp = Experiment(name="lanes", cases=["016_x", "001_y"], methods=["inlumen"], models=["p:a", "p:b", "p:c"],
+                     tracks=["fixed_graph"], repetitions=2)
+    exp.save(tmp_path)
+    live: dict[str, int] = {}
+    peak = {"models": 0, "same": 0}
+    lock = threading.Lock()
+    unloaded = []
+
+    def fake_run(root, corpus, exp, ep, profiles, limits):
+        with lock:
+            live[ep["model"]] = live.get(ep["model"], 0) + 1
+            peak["models"] = max(peak["models"], sum(1 for n in live.values() if n))
+            peak["same"] = max(peak["same"], max(live.values()))
+        time.sleep(0.02)
+        with lock:
+            live[ep["model"]] -= 1
+
+    monkeypatch.setattr(runner, "run_episode", fake_run)
+    monkeypatch.setattr(runner, "load_profiles", dict)
+    monkeypatch.setattr(runner, "unload_model", lambda profiles, model, log: unloaded.append(model))
+    runner.run_experiment(tmp_path, corpus=None, workers=2)
+    assert peak == {"models": 2, "same": 1}
+    assert sorted(unloaded) == ["p:a", "p:b", "p:c"]
+
+
+def test_progress_shows_waiting_time_model_and_missing_cost():
+    from inlumen_bench.events import Bus
+    from inlumen_bench.progress import ProgressTracker, _budget_text, request_text
+
+    t = ProgressTracker(1, "x", bus=Bus())
+    t.on_event({"type": "episode_started", "episode_id": "e", "group": "g", "model": "ollama:m", "mono": 0})
+    t.on_event({"type": "request_started", "episode_id": "e", "streamed": False, "mono": 100.0})
+    view = t.active["e"]
+    assert view.model == "ollama:m" and request_text(view, now=142.4) == "waiting for reply · 42s"
+    t.on_event({"type": "request_finished", "episode_id": "e", "usage": {"output_tokens": 1200}})
+    assert request_text(view) == "done 1,200 tok"
+    t.on_event({"type": "log", "episode_id": None, "message": "ollama:m: all runs done; unloaded from Ollama"})
+    assert t.changes[-1].endswith("unloaded from Ollama") and "(ollama:m)" in t.changes[0]
+    assert _budget_text({"cost_incomplete": True, "requests": 3, "max_requests": 40}) == "no cost data · 3/40 req"
+
+
+def test_run_log_is_kept_in_the_experiment_folder(tmp_path):
+    from inlumen_bench.jobs import log_line, read_log
+
+    for i in range(5):
+        log_line(tmp_path, f"line {i}")
+    assert [l.split(" ", 2)[2] for l in read_log(tmp_path, 3)] == ["line 2", "line 3", "line 4"]
+    assert len(read_log(tmp_path)) == 5

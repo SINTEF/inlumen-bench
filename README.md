@@ -108,9 +108,19 @@ the model's files:
 ```sh
 curl -s localhost:11434/api/create -d '{"model": "qwen3.8-32k", "from": "qwen3.8:latest", "parameters": {"num_ctx": 32768}}'
 ```
-An experiment runs its models one after another (in random order within each model),
-so a local server holds one model at a time. Set the profile's parallel requests to
-what the server allows.
+An experiment runs each model's runs in random order, and by default at most one run
+per model at a time ("Runs per model at a time", `--runs-per-model`): Ollama answers one
+request per model at a time, so more runs of one model would only wait, and the wait
+would count as their time. Parallel runs ("Runs in parallel", `--workers`) therefore go
+to different models; Ollama puts each model on its own GPU when it fits, so two runs in
+parallel use two GPUs. When a model has no runs left, the bench asks Ollama to unload
+it, so the next model gets its GPU. Set the profile's parallel requests to at least the
+number of runs in parallel, or the requests queue in the bench instead. With hosted
+APIs, raise the runs per model.
+
+Progress: the dashboard shows each running run's model, phase and request (with how
+long it has been waiting), and the experiment's log is kept in
+`runs/<experiment>/run.log`, with a summary line every 30 seconds.
 
 ## Native install
 Python 3.11+ (or [uv](https://docs.astral.sh/uv/)) and a running Docker engine.

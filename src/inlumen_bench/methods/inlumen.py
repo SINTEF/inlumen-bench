@@ -276,7 +276,7 @@ class Inlumen(Method):
                     request_id = uuid.uuid4().hex[:12]
                     pending["id"], pending["started"] = request_id, time.monotonic()
                     events.emit("request_started", request_id=request_id, purpose="design_agent",
-                                model=str(ctx.llm.ref), attempt=0, max_tokens=None)
+                                model=str(ctx.llm.ref), attempt=0, max_tokens=None, streamed=False)
                     result = await super().create(messages, **kwargs)
                     note_calls(result)
                     return result
