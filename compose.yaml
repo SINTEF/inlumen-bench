@@ -7,7 +7,7 @@
 #   BENCH_CONFIG_DIR  config and endpoint profiles (default ~/.config/inlumen-bench)
 #   BENCH_PORT        dashboard port on localhost (default 8000)
 x-bench: &bench
-  image: inlumen-bench:0.2.0
+  image: inlumen-bench:0.3.0
   build: .
   volumes:
     - /var/run/docker.sock:/var/run/docker.sock

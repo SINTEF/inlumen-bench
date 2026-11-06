@@ -149,8 +149,13 @@ def output_artifact(filename: str, port: str) -> dict:
             **classify_artifact(filename)}
 
 
-def canvas_graph(design: dict, names: dict[str, str], title: str = "") -> dict:
-    """A bench design as an inLUMEN canvas graph; Task step ids are the asset names."""
+def canvas_graph(design: dict, names: dict[str, str], title: str = "", *, contracts: bool = True) -> dict:
+    """A bench design as an inLUMEN canvas graph; Task step ids are the asset names.
+
+    With `contracts=False` (the ablation without explicit artifact contracts) the
+    tasks declare no output artifacts and their ports have generic names, so the
+    code generator sees the components and dependencies but no file contracts.
+    """
     order = topo_order(design)
     sources = source_ids(design, set(names.values()))
     made_by = producers(design)
@@ -174,20 +179,24 @@ def canvas_graph(design: dict, names: dict[str, str], title: str = "") -> dict:
         in_ids = port_ids(task["inputs"], "input")
         out_ids = port_ids(task["outputs"], "output")
         requirements = " ".join(task.get("requirements") or [])
-        nodes.append({"id": step, "data": {
+        data = {
             "type": "task",
             "label": task.get("name") or task["id"],
             "description": f"{task.get('operation', '')}: {requirements}".strip(": "),
             "param": dict(task.get("parameters") or {}),
             "ports": {
-                "inputs": [{"id": pid, "name": item.split(":", 1)[-1], "type": port_kind(item), "required": True}
-                           for pid, item in zip(in_ids, task["inputs"])],
-                "outputs": [{"id": pid, "name": artifact, "type": port_kind(artifact)}
-                            for pid, artifact in zip(out_ids, task["outputs"])],
+                "inputs": [{"id": pid, "name": item.split(":", 1)[-1] if contracts else f"input {n}",
+                            "type": port_kind(item) if contracts else "any", "required": True}
+                           for n, (pid, item) in enumerate(zip(in_ids, task["inputs"]), 1)],
+                "outputs": [{"id": pid, "name": artifact if contracts else f"output {n}",
+                             "type": port_kind(artifact) if contracts else "any"}
+                            for n, (pid, artifact) in enumerate(zip(out_ids, task["outputs"]), 1)],
             },
-            "implementation": {"output_artifacts": [
-                output_artifact(artifact, pid) for pid, artifact in zip(out_ids, task["outputs"])]},
-        }})
+        }
+        if contracts:
+            data["implementation"] = {"output_artifacts": [
+                output_artifact(artifact, pid) for pid, artifact in zip(out_ids, task["outputs"])]}
+        nodes.append({"id": step, "data": data})
         for pid, item in zip(in_ids, task["inputs"]):
             if item not in out_port or made_by.get(item) == task["id"]:
                 continue

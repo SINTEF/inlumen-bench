@@ -36,7 +36,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from . import __version__
-from . import design_score
+from . import design_score, metrics
 from .budget import Budget, BudgetExceeded, Limits
 from .contract import CONTRACT_VERSION, render
 from .corpus import TRACKS, Corpus
@@ -52,6 +52,30 @@ DESIGN_METHOD = "inlumen"
 REFERENCE = "reference"
 # Before bench 0.2, `inlumen` was a standalone reimplementation of inLUMEN.
 LEGACY_METHOD_ALIASES = {"inlumen": "inlumen-standalone"}
+CONDITIONED_METHOD = "inlumen"
+
+
+def make_conditions(stage: str, *, grounding: tuple[bool, ...] = (True,), contracts: tuple[bool, ...] = (True,),
+                    repair: tuple[bool, ...] = (True,), repairs: int = 2) -> list[dict]:
+    """The full factorial of the chosen support mechanisms, or [] for inLUMEN's defaults.
+
+    Composition varies metamodel grounding; implementation varies explicit
+    artifact contracts and the repair loop independently.
+    """
+    if stage == "design":
+        if list(grounding) == [True]:
+            return []
+        return [{"name": "grounded" if g else "ungrounded", "slug": "g" if g else "ug",
+                 "options": {"grounded": g}} for g in grounding]
+    if list(contracts) == [True] and list(repair) == [True]:
+        return []
+    out = []
+    for c in contracts:
+        for r in repair:
+            name = ("contracts" if c else "no contracts") + " · " + (f"repair ×{repairs}" if r else "no repair")
+            out.append({"name": name, "slug": ("c" if c else "nc") + ("r" if r else "nr"),
+                        "options": {"artifact_contracts": c, "repair_attempts": repairs if r else 0}})
+    return out
 
 
 @dataclass
@@ -77,6 +101,10 @@ class Experiment:
     # Episode method name → method that runs it. Experiments made before `inlumen`
     # ran inLUMEN's own agents keep the reimplementation they started with.
     method_aliases: dict = field(default_factory=dict)
+    # Experimental conditions for the ablation study: [{"name", "slug", "options"}].
+    # Each applies to the `inlumen` method only (the baseline has no support to
+    # switch off); empty means inLUMEN's defaults.
+    conditions: list = field(default_factory=list)
 
     @property
     def design_source(self) -> str:
@@ -84,9 +112,9 @@ class Experiment:
         if self.stage == "design":
             return "—"
         if self.designs:
-            return f"designs from {self.design_from}"
-        return "reference designs" if self.tracks == ["fixed_graph"] else ", ".join(
-            "reference designs" if t == "fixed_graph" else "designed in the same episode" for t in self.tracks)
+            return f"compositions from {self.design_from}"
+        return "reference compositions" if self.tracks == ["fixed_graph"] else ", ".join(
+            "reference compositions" if t == "fixed_graph" else "composed in the same run" for t in self.tracks)
 
     @classmethod
     def load(cls, root: Path) -> "Experiment":
@@ -101,30 +129,38 @@ class Experiment:
         root.mkdir(parents=True, exist_ok=True)
         (root / "experiment.json").write_text(json.dumps(asdict(self), indent=2) + "\n")
 
+    def conditions_for(self, method: str) -> list[dict | None]:
+        """The conditions a method runs under (None: its defaults, no suffix in run ids)."""
+        if self.conditions and self.method_for(method) == CONDITIONED_METHOD:
+            return list(self.conditions)
+        return [None]
+
     def episodes(self) -> list[dict]:
         out = []
+
+        def add(base: dict, id_prefix: str, rep: int) -> None:
+            for cond in self.conditions_for(base["method"]):
+                suffix = f"-{cond['slug']}" if cond else ""
+                extra = {"condition": cond["name"], "condition_options": cond["options"]} if cond else {}
+                out.append({**base, **extra, "id": f"{id_prefix}{suffix}-r{rep}", "repetition": rep})
+
         if self.stage == "design":
             for case in self.cases:
                 for model in self.models:
                     for rep in range(self.repetitions):
-                        out.append({
-                            "id": f"{case[:3]}-design-{ModelRef.parse(model).slug}-r{rep}",
-                            "case_id": case, "method": DESIGN_METHOD, "model": model,
-                            "track": "natural_language", "design": "own", "repetition": rep,
-                        })
+                        add({"case_id": case, "method": DESIGN_METHOD, "model": model,
+                             "track": "natural_language", "design": "own"},
+                            f"{case[:3]}-design-{ModelRef.parse(model).slug}", rep)
         elif self.designs:
             for d in self.designs:
                 dslug = f"{ModelRef.parse(d['model']).slug}-r{d['repetition']}"
                 for method in self.methods:
                     for model in self.models:
                         for rep in range(self.repetitions):
-                            out.append({
-                                "id": f"{d['case_id'][:3]}-{method}-{ModelRef.parse(model).slug}"
-                                      f"-from-{dslug}-r{rep}",
-                                "case_id": d["case_id"], "method": method, "model": model,
-                                "track": "natural_language", "design": d["model"],
-                                "design_episode": d["episode"], "repetition": rep,
-                            })
+                            add({"case_id": d["case_id"], "method": method, "model": model,
+                                 "track": "natural_language", "design": d["model"],
+                                 "design_episode": d["episode"]},
+                                f"{d['case_id'][:3]}-{method}-{ModelRef.parse(model).slug}-from-{dslug}", rep)
         else:
             for case in self.cases:
                 for method in self.methods:
@@ -132,15 +168,9 @@ class Experiment:
                         for track in self.tracks:
                             for rep in range(self.repetitions):
                                 ref = ModelRef.parse(model)
-                                out.append({
-                                    "id": f"{case[:3]}-{method}-{ref.slug}-{TRACK_SHORT[track]}-r{rep}",
-                                    "case_id": case,
-                                    "method": method,
-                                    "model": model,
-                                    "track": track,
-                                    "design": REFERENCE if track == "fixed_graph" else "own",
-                                    "repetition": rep,
-                                })
+                                add({"case_id": case, "method": method, "model": model, "track": track,
+                                     "design": REFERENCE if track == "fixed_graph" else "own"},
+                                    f"{case[:3]}-{method}-{ref.slug}-{TRACK_SHORT[track]}", rep)
         # Random order spreads order effects (cache warmth, rate limits) over cells.
         random.Random(self.seed).shuffle(out)
         return out
@@ -177,6 +207,23 @@ def delete_experiment(root: Path) -> None:
     if not (root / "experiment.json").is_file():
         raise FileNotFoundError(f"{root} is not an experiment")
     shutil.rmtree(root)
+
+
+def delete_runs(root: Path, run_ids: list[str]) -> int:
+    """Removes runs' folders (and their interrupted attempts); they become pending
+    and run again on Resume. Scores of earlier evaluation batches stay in
+    `evaluation/` for audit. Returns how many runs had a folder."""
+    known = {ep["id"] for ep in Experiment.load(root).episodes()}
+    removed = 0
+    for run_id in run_ids:
+        if run_id not in known:
+            raise ValueError(f"{run_id} is not a run of {root.name}")
+        folders = [root / "episodes" / run_id, *(root / "episodes").glob(f"{run_id}.interrupted-*")]
+        removed += folders[0].is_dir()
+        for folder in folders:
+            if folder.is_dir():
+                shutil.rmtree(folder)
+    return removed
 
 
 def create_experiment(root: Path, corpus: Corpus, *, stage: str = "code", design_from: str = REFERENCE,
@@ -266,17 +313,30 @@ def run_episode(root: Path, corpus: Corpus, exp: Experiment, ep: dict, profiles,
     budget = Budget(limits)
     method = get_method(exp.method_for(ep["method"]))
     ref = ModelRef.parse(ep["model"])
+    reference_file = corpus.root / "corpus/pipelines" / ep["case_id"] / "task_graph.json"
+    reference = json.loads(reference_file.read_text()) if reference_file.is_file() else {"tasks": []}
     state = {
         **ep,
         "status": "running",
         "method_version": method.version,
         "dataset_commit": exp.dataset.get("commit"),
         "started_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        # RQ3: complexity of the reference composition, and the condition of the run.
+        "complexity": metrics.complexity(reference),
+        "conditions": {
+            "method": exp.method_for(ep["method"]), "model": ep["model"], "replicate": ep["repetition"],
+            "composition_source": ("prompt" if exp.stage == "design" else ep.get("design_episode")
+                                   and f"{exp.design_from}/{ep['design_episode']}" or ep.get("design")),
+            "limits": dict(exp.limits),
+            "options": {**exp.method_options.get(ep["method"], {}), **(ep.get("condition_options") or {})},
+            **({"name": ep["condition"]} if ep.get("condition") else {}),
+        },
     }
     _write_state(ep_dir, state)
     events.emit("episode_started", group=f"{ep['method']}·{ep['model']}", **ep)
 
     phase = "export"
+    ctx = None
     try:
         events.emit("phase_started", phase=phase)
         workspace = corpus.export(ep["case_id"], ep_dir / "workspace", ep["track"])
@@ -306,7 +366,7 @@ def run_episode(root: Path, corpus: Corpus, exp: Experiment, ep: dict, profiles,
             budget=budget,
             asset_names=(corpus.case_info(ep["case_id"])["logical_to_asset"]
                          if ep["track"] == "fixed_graph" else {}),
-            options=exp.method_options.get(ep["method"], {}),
+            options={**exp.method_options.get(ep["method"], {}), **(ep.get("condition_options") or {})},
             design=design,
         )
         ctx.work_dir.mkdir()
@@ -314,10 +374,10 @@ def run_episode(root: Path, corpus: Corpus, exp: Experiment, ep: dict, profiles,
         events.emit("phase_finished", phase=phase)
         state.update(status=result.status, error=result.error, checkpoints=result.checkpoints,
                      counters=result.counters)
+        ctx.details.update(result.details)
         design_file = ctx.work_dir / "design.json"
         if design_file.is_file() and ep["track"] == "natural_language" and design is None:
             # Operator-side scoring against the private reference graph, after generation.
-            reference = json.loads((corpus.root / "corpus/pipelines" / ep["case_id"] / "task_graph.json").read_text())
             state["design_score"] = design_score.score(json.loads(design_file.read_text()), reference)
     except BudgetExceeded as exc:
         state.update(status="generation_failed", error=f"budget: {exc}", failed_phase=phase)
@@ -327,12 +387,69 @@ def run_episode(root: Path, corpus: Corpus, exp: Experiment, ep: dict, profiles,
         state.update(status="infra_error", error=f"{type(exc).__name__}: {exc}", failed_phase=phase)
         (ep_dir / "traceback.txt").write_text(traceback.format_exc())
 
+    if ctx is not None:
+        _merge_details(state, ctx.details)
+    graph_file = ep_dir / "work" / "inlumen-graph.json"
+    if graph_file.is_file() and exp.stage == "design":
+        state["composition"] = metrics.composition_summary(json.loads(graph_file.read_text()))
+    if state.get("error") and state["status"] == "generation_failed":
+        state.setdefault("failure_category", metrics.classify_failure(state["error"]))
     state["budget"] = budget.snapshot()
-    state["usage"] = usage_totals(ep_dir / "events.jsonl")
     state["finished_at"] = datetime.now(UTC).isoformat(timespec="seconds")
-    _write_state(ep_dir, state)
     events.emit("episode_finished", status=state["status"], error=state.get("error"))
+    record_usage(ep_dir, state)
+    _write_state(ep_dir, state)
     return state
+
+
+def _merge_details(state: dict, details: dict) -> None:
+    for key, value in (details or {}).items():
+        if key == "conditions":
+            state["conditions"].update(value)
+        else:
+            state[key] = value
+
+
+def recompute(root: Path, corpus: Corpus) -> int:
+    """Recomputes the measures of finished runs from their files (for runs made before
+    a measure existed, or after the scoring changed). Returns how many runs changed."""
+    exp = Experiment.load(root)
+    changed = 0
+    for ep in exp.episodes():
+        ep_dir = root / "episodes" / ep["id"]
+        state = episode_state(ep_dir)
+        if not state or state.get("status") == "running":
+            continue
+        before = json.dumps(state, sort_keys=True, default=str)
+        reference_file = corpus.root / "corpus/pipelines" / ep["case_id"] / "task_graph.json"
+        reference = json.loads(reference_file.read_text()) if reference_file.is_file() else None
+        if reference is not None:
+            state["complexity"] = metrics.complexity(reference)
+        state.setdefault("conditions", {"method": exp.method_for(ep["method"]), "model": ep["model"],
+                                        "replicate": ep["repetition"], "limits": dict(exp.limits)})
+        work = ep_dir / "work"
+        if exp.stage == "design" and (work / "inlumen-graph.json").is_file():
+            state["composition"] = metrics.composition_summary(json.loads((work / "inlumen-graph.json").read_text()))
+        if (reference is not None and (work / "design.json").is_file() and ep["track"] == "natural_language"
+                and not ep.get("design_episode")):
+            state["design_score"] = design_score.score(json.loads((work / "design.json").read_text()), reference)
+        report = Path(state["evaluation_report"]) if state.get("evaluation_report") else None
+        if report is not None and (report / "result.json").is_file():
+            state["execution"] = metrics.execution_summary(json.loads((report / "result.json").read_text()), report)
+        if state.get("error") and state.get("status") == "generation_failed":
+            state["failure_category"] = metrics.classify_failure(state["error"])
+        record_usage(ep_dir, state)
+        if json.dumps(state, sort_keys=True, default=str) != before:
+            _write_state(ep_dir, state)
+            changed += 1
+    return changed
+
+
+def record_usage(ep_dir: Path, state: dict) -> None:
+    """Usage totals and the split by phase, recomputed from the run's events."""
+    events = read_events(ep_dir / "events.jsonl")
+    state["usage"] = usage_totals(ep_dir / "events.jsonl")
+    state["phases"] = metrics.phase_usage(events)
 
 
 def usage_totals(events_path: Path) -> dict:

@@ -44,6 +44,9 @@ class EpisodeContext:
     options: dict = field(default_factory=dict)
     # Code from a step-1 design: the task graph to implement (not ServiceCraft's).
     design: dict | None = None
+    # What the method records as it goes (conditions, traces); the runner keeps it
+    # even when the method stops with an exception (budget, provider).
+    details: dict = field(default_factory=dict)
 
     @property
     def prompt(self) -> str:
@@ -65,6 +68,9 @@ class MethodResult:
     error: str | None = None
     checkpoints: list[dict] = field(default_factory=list)
     counters: dict = field(default_factory=dict)
+    # Recorded in episode.json as is: "conditions" (the experimental condition the
+    # method ran under), "composition" and "implementation" (trace summaries).
+    details: dict = field(default_factory=dict)
 
 
 class InfraError(Exception):
