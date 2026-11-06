@@ -30,7 +30,7 @@ import random
 import shutil
 import threading
 import traceback
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -296,56 +296,96 @@ def pending_episodes(root: Path, exp: Experiment) -> list[dict]:
 
 
 class ModelQueue:
-    """Hands out pending runs model by model, at most `per_model` of one model at a time.
+    """Hands out pending runs model by model.
 
-    A worker keeps to the model it last ran while that model has runs left, so each
-    model stays with one worker (and so one GPU on a local server) until it is done.
+    A profile with several `endpoints` (one Ollama server per GPU) gets one lane per
+    endpoint. A lane runs one model at a time (at most `per_model` runs of it at once)
+    and keeps that model while it has runs left; every lane can run the same model, so
+    no GPU waits while another model finishes. Other profiles use their base URL, with
+    at most `per_model` runs of one model at a time, and a worker keeps to its model.
     """
 
-    def __init__(self, todo: list[dict], per_model: int = 1) -> None:
+    def __init__(self, todo: list[dict], per_model: int = 1, endpoints: dict[str, list[str]] | None = None) -> None:
         self.runs: dict[str, list[dict]] = {}
         for ep in todo:  # `todo` is already in model order.
             self.runs.setdefault(ep["model"], []).append(ep)
         self.active = {m: 0 for m in self.runs}
         self.per_model = max(1, per_model)
+        self.endpoints = {name: urls for name, urls in (endpoints or {}).items() if urls}
+        self.lanes = {url: {"model": None, "busy": 0} for urls in self.endpoints.values() for url in urls}
         self.lock = threading.Lock()
 
-    def take(self, prefer: str | None = None) -> dict | None:
+    def _lane(self, model: str, prefer: str | None) -> str | None:
+        urls = self.endpoints[model.partition(":")[0]]
+        ranked = ([prefer] if prefer in urls else []) + urls
+        for url in ranked:  # A lane already on this model, then an idle one (unloaded first).
+            if self.lanes[url]["model"] == model and self.lanes[url]["busy"] < self.per_model:
+                return url
+        idle = [u for u in ranked if not self.lanes[u]["busy"]]
+        return next((u for u in idle if self.lanes[u]["model"] in (None, model)), idle[0] if idle else None)
+
+    def take(self, prefer: str | None = None, lane: str | None = None) -> tuple[dict, str | None, str | None] | None:
+        """The next run for a worker: (run, endpoint or None for the base URL, model to
+        unload from that endpoint first or None)."""
         with self.lock:
             order = ([prefer] if prefer in self.runs else []) + list(self.runs)
             for model in order:
-                if self.runs[model] and self.active[model] < self.per_model:
-                    self.active[model] += 1
-                    return self.runs[model].pop(0)
-            return None  # The rest belong to models other workers are running.
+                if not self.runs[model]:
+                    continue
+                if model.partition(":")[0] not in self.endpoints:
+                    if self.active[model] < self.per_model:
+                        self.active[model] += 1
+                        return self.runs[model].pop(0), None, None
+                    continue
+                url = self._lane(model, lane)
+                if url is None:
+                    continue
+                previous = self.lanes[url]["model"]
+                self.lanes[url].update(model=model, busy=self.lanes[url]["busy"] + 1)
+                self.active[model] += 1
+                return self.runs[model].pop(0), url, previous if previous not in (None, model) else None
+            return None  # The rest belong to models or lanes other workers are running.
 
-    def release(self, ep: dict) -> bool:
-        """Marks a run done; True when that was the model's last run."""
+    def release(self, ep: dict, url: str | None = None) -> list[str | None] | None:
+        """Marks a run done. When that was the model's last run, returns where to unload it
+        from (endpoints, or [None] for the base URL); otherwise None."""
+        model = ep["model"]
         with self.lock:
-            self.active[ep["model"]] -= 1
-            return not self.runs[ep["model"]] and not self.active[ep["model"]]
+            self.active[model] -= 1
+            if url is not None:
+                self.lanes[url]["busy"] -= 1
+            if self.runs[model] or self.active[model]:
+                return None
+            if model.partition(":")[0] not in self.endpoints:
+                return [None]
+            holding = [u for u, lane in self.lanes.items() if lane["model"] == model and not lane["busy"]]
+            for u in holding:
+                self.lanes[u]["model"] = None
+            return holding
 
     def progress(self, model: str) -> tuple[int, int]:
         with self.lock:
             return self.active[model], len(self.runs[model])
 
 
-def unload_model(profiles: dict, model: str, log: EventLog) -> None:
-    """Asks an Ollama server to unload a model that has no runs left, so the next model
-    gets its GPU instead of sharing another one. Other servers are left alone."""
+def unload_model(profiles: dict, model: str, log: EventLog, url: str | None = None, *, finished: bool = True) -> None:
+    """Asks an Ollama server (`url`, or the profile's base URL) to unload a model, so the
+    next model gets the whole GPU. Other servers are left alone."""
     import httpx
 
     ref = ModelRef.parse(model)
     profile = profiles.get(ref.profile)
     if profile is None:
         return
-    root = profile.base_url.rstrip("/").removesuffix("/v1")
+    root = (url or profile.base_url).rstrip("/").removesuffix("/v1")
     try:
         with httpx.Client(timeout=10) as client:
             if "version" not in client.get(f"{root}/api/version").json():
                 return
             client.post(f"{root}/api/generate", json={"model": ref.model, "keep_alive": 0}, timeout=60)
-        log.emit("log", message=f"{model}: all runs done; unloaded from Ollama")
+        where = f" at {root}" if url else ""
+        log.emit("log", message=f"{model}: " + ("all runs done; unloaded" if finished else "unloaded")
+                 + f" from Ollama{where}")
     except Exception:  # noqa: BLE001, S110 - not Ollama, or not reachable: nothing to free
         pass
 
@@ -355,27 +395,35 @@ def run_experiment(root: Path, corpus: Corpus, workers: int = 2, stop: threading
     todo = pending_episodes(root, exp)
     profiles = load_profiles()
     limits = Limits(**exp.limits)
-    queue = ModelQueue(todo, exp.runs_per_model)
+    used = {ModelRef.parse(m).profile for m in exp.models}
+    endpoints = {name: p.run_endpoints for name, p in profiles.items() if name in used and p.run_endpoints}
+    queue = ModelQueue(todo, exp.runs_per_model, endpoints)
     log = EventLog(None)
     errors: list[BaseException] = []
+    for name, urls in endpoints.items():
+        log.emit("log", message=f"{name}: {len(urls)} servers side by side: {', '.join(urls)}")
 
     def worker() -> None:
-        model = None
+        model = lane = None
         while not (stop and stop.is_set()):
-            ep = queue.take(prefer=model)
-            if ep is None:
+            taken = queue.take(prefer=model, lane=lane)
+            if taken is None:
                 return
-            if ep["model"] != model:
-                model = ep["model"]
-                log.emit("log", message=f"{model}: starting its runs ({sum(queue.progress(model))} left)")
+            ep, url, previous = taken
+            if previous:
+                unload_model(profiles, previous, log, url, finished=False)
+            if (ep["model"], url) != (model, lane):
+                model, lane = ep["model"], url
+                where = f" on {url}" if url else ""
+                log.emit("log", message=f"{model}: starting its runs{where} ({sum(queue.progress(model))} left)")
             try:
-                run_episode(root, corpus, exp, ep, profiles, limits)
+                run_episode(root, corpus, exp, ep, profiles, limits, endpoint=url)
             except BaseException as exc:  # noqa: BLE001 - re-raised after the other workers stop
                 errors.append(exc)
                 return
             finally:
-                if queue.release(ep):
-                    unload_model(profiles, model, log)
+                for where in queue.release(ep, url) or []:
+                    unload_model(profiles, ep["model"], log, where)
 
     threads = [threading.Thread(target=worker, name=f"run-worker-{i}", daemon=True)
                for i in range(max(1, workers))]
@@ -387,7 +435,8 @@ def run_experiment(root: Path, corpus: Corpus, workers: int = 2, stop: threading
         raise errors[0]
 
 
-def run_episode(root: Path, corpus: Corpus, exp: Experiment, ep: dict, profiles, limits: Limits) -> dict:
+def run_episode(root: Path, corpus: Corpus, exp: Experiment, ep: dict, profiles, limits: Limits,
+                endpoint: str | None = None) -> dict:
     ep_dir = root / "episodes" / ep["id"]
     if ep_dir.exists():
         # An interrupted earlier attempt is kept for audit, never reused.
@@ -406,6 +455,7 @@ def run_episode(root: Path, corpus: Corpus, exp: Experiment, ep: dict, profiles,
         "method_version": method.version,
         "dataset_commit": exp.dataset.get("commit"),
         "started_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        **({"endpoint": endpoint} if endpoint else {}),
         # RQ3: complexity of the reference composition, and the condition of the run.
         "complexity": metrics.complexity(reference),
         "conditions": {
@@ -433,6 +483,8 @@ def run_episode(root: Path, corpus: Corpus, exp: Experiment, ep: dict, profiles,
         phase = "generate"
         events.emit("phase_started", phase=phase)
         profile = profiles[ref.profile]
+        if endpoint:
+            profile = replace(profile, base_url=endpoint)
         design = None
         if ep.get("design_episode"):
             source = root.parent / exp.design_from / "episodes" / ep["design_episode"] / "work/design.json"

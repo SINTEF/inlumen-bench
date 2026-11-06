@@ -134,11 +134,11 @@ def providers_list() -> None:
     if not profiles:
         console.print("no profiles (add one with `bench providers add`)")
         return
-    table = Table("name", "base url", "api key", "parallel", "timeout", "stall")
+    table = Table("name", "base url", "servers for runs", "api key", "parallel", "timeout", "stall")
     for p in profiles.values():
         m = p.masked()
         key = f"env:{p.api_key_env}" if p.api_key_env else (m["api_key"] or "—")
-        table.add_row(p.name, p.base_url, key, str(p.max_parallel), f"{p.timeout_s:.0f}s", f"{p.stall_s:.0f}s")
+        table.add_row(p.name, p.base_url, "\n".join(p.run_endpoints) or "base url", key, str(p.max_parallel), f"{p.timeout_s:.0f}s", f"{p.stall_s:.0f}s")
     console.print(table)
 
 
@@ -152,6 +152,9 @@ def providers_add(
     max_parallel: Optional[int] = typer.Option(None),
     timeout_s: Optional[float] = typer.Option(None),
     stall_s: Optional[float] = typer.Option(None),
+    endpoint: Optional[list[str]] = typer.Option(
+        None, help="A server for runs, repeatable: one Ollama per GPU (see scripts/ollama-gpus). "
+                   "Runs then go to these instead of the base URL."),
 ) -> None:
     if preset not in PRESETS:
         _fail(f"Unknown preset {preset!r}")
@@ -162,7 +165,8 @@ def providers_add(
     if not values["base_url"]:
         _fail("--base-url is required for a custom profile")
     api_key = typer.prompt("API key", hide_input=True) if ask_key else None
-    path = upsert_profile(Profile(name=name, api_key=api_key, api_key_env=api_key_env, **values))
+    path = upsert_profile(Profile(name=name, api_key=api_key, api_key_env=api_key_env,
+                                  endpoints=list(endpoint or []), **values))
     console.print(f"saved profile {name!r} in {path}")
 
 
@@ -235,10 +239,10 @@ def run(
     max_cost: Optional[float] = typer.Option(None, help="USD per episode."),
     max_seconds: Optional[float] = typer.Option(None, help="Wall time per episode."),
     max_requests: Optional[int] = typer.Option(None, help="Model requests per episode."),
-    workers: int = typer.Option(2, help="Runs in parallel (models run one after another)."),
+    workers: int = typer.Option(2, help="Runs in parallel: the number of servers for runs (one Ollama per GPU), "
+                                          "or else different models side by side."),
     runs_per_model: int = typer.Option(
-        1, help="Runs of one model at a time. Keep 1 for a local Ollama (one request per model at a time); "
-                "parallel runs then go to different models, each on its own GPU."),
+        1, help="Runs of one model at a time per server. Keep 1 for Ollama (one request per model at a time)."),
     grounding: str = typer.Option("on", help="Composition: metamodel grounding on, off or both (ablation)."),
     contracts: str = typer.Option("on", help="Implementation: explicit artifact contracts on, off or both."),
     repair: str = typer.Option("on", help="Implementation: the repair loop on, off or both."),

@@ -51,6 +51,14 @@ class Profile:
     stall_s: float = 120
     # Ask the server for a final usage chunk while streaming (OpenAI `stream_options`).
     stream_usage: bool = True
+    # Several servers with the same models, used side by side for runs (e.g. one Ollama per
+    # GPU, see scripts/ollama-gpus). When set, runs go to these instead of `base_url`; each
+    # runs one model at a time. `base_url` is still used to list and test models.
+    endpoints: list[str] = field(default_factory=list)
+
+    @property
+    def run_endpoints(self) -> list[str]:
+        return [u.strip() for u in self.endpoints if u.strip()]
 
     @property
     def is_openrouter(self) -> bool:
