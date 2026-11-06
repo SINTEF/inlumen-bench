@@ -32,7 +32,9 @@ class EpisodeView:
     detail: str = ""
     request: str = ""
     budget: str = ""
+    model: str = ""
     started: float = field(default_factory=time.monotonic)
+    request_since: float | None = None  # while waiting for a reply or its first token
 
 
 class ProgressTracker:
@@ -45,6 +47,7 @@ class ProgressTracker:
         self.failed = 0
         self.active: dict[str, EpisodeView] = {}
         self.durations: dict[str, list[float]] = {}
+        self.finished_by_model: dict[str, int] = {}
         self.lock = threading.Lock()
         self.bus = bus
         self.changes: list[str] = []
@@ -65,17 +68,21 @@ class ProgressTracker:
         eid = e.get("episode_id")
         kind = e["type"]
         with self.lock:
+            if kind == "log" and not eid:  # Experiment-level messages (a model starts, is unloaded).
+                self.changes.append(e.get("message", ""))
+                return
             if kind == "episode_started":
-                view = EpisodeView(eid, e.get("group", ""))
+                view = EpisodeView(eid, e.get("group", ""), model=e.get("model", ""))
                 # Monotonic time is system-wide, so replayed events keep their real start.
                 view.started = e.get("mono", view.started)
                 self.active[eid] = view
-                self.changes.append(f"start  {eid}")
+                self.changes.append(f"start  {eid}" + (f" ({e.get('model')})" if e.get("model") else ""))
                 return
             view = self.active.get(eid)
             if kind == "episode_finished":
                 if view:
                     self.durations.setdefault(view.group, []).append(time.monotonic() - view.started)
+                    self.finished_by_model[view.model] = self.finished_by_model.get(view.model, 0) + 1
                     del self.active[eid]
                 if e.get("status") in ("generated", "evaluated", "designed"):
                     self.done += 1
@@ -95,12 +102,17 @@ class ProgressTracker:
             elif kind == "repair_started":
                 view.detail = f"repair {e['attempt']}/{e['max_attempts']} ({e.get('reason', '')[:40]})"
             elif kind == "request_started":
-                view.request = "waiting for first token"
+                # Streamed replies show tokens as they arrive; others (the design agent's)
+                # only arrive whole, so all there is to show is how long it has taken.
+                view.request = "waiting for first token" if e.get("streamed", True) else "waiting for reply"
+                view.request_since = e.get("mono", time.monotonic())
             elif kind == "request_progress":
                 view.request = f"↓ ≈{e['approx_tokens']:,} tok · {e['elapsed_s']:.0f}s"
-            elif kind == "request_finished":
+                view.request_since = None
+            elif kind in ("request_finished", "request_failed"):
                 out = (e.get("usage") or {}).get("output_tokens")
-                view.request = f"done {out:,} tok" if out else "done"
+                view.request = ("failed" if kind == "request_failed" else f"done {out:,} tok" if out else "done")
+                view.request_since = None
             elif kind == "stall_warning":
                 view.request = f"⚠ stalled {e['seconds']:.0f}s"
             elif kind == "budget_update":
@@ -109,10 +121,18 @@ class ProgressTracker:
                 view.detail = e.get("message", "")
 
 
+def request_text(view: EpisodeView, now: float | None = None) -> str:
+    """The request state, with how long it has been waiting."""
+    if view.request_since is None:
+        return view.request
+    return f"{view.request} · {(now or time.monotonic()) - view.request_since:.0f}s"
+
+
 def _budget_text(b: dict) -> str:
-    cost = "?" if b.get("cost_incomplete") and not b.get("cost_usd") else f"${b.get('cost_usd', 0):.3f}"
-    if b.get("max_cost_usd"):
-        cost += f"/${b['max_cost_usd']:.2f}"
+    if b.get("cost_incomplete") and not b.get("cost_usd"):
+        cost = "no cost data"  # Local servers (and the design agent's client) report none.
+    else:
+        cost = f"${b.get('cost_usd', 0):.3f}" + (f"/${b['max_cost_usd']:.2f}" if b.get("max_cost_usd") else "")
     reqs = f"{b.get('requests', 0)}" + (f"/{b['max_requests']}" if b.get("max_requests") else "")
     return f"{cost} · {reqs} req"
 
@@ -172,9 +192,15 @@ class PlainView:
         if time.monotonic() - self.last_summary >= SUMMARY_INTERVAL_S:
             self.last_summary = time.monotonic()
             with t.lock:
+                now = time.monotonic()
+                running = "; ".join(f"{v.episode_id} {v.phase} {request_text(v, now)}".strip()
+                                    for v in t.active.values())
+                by_model = ", ".join(f"{m.partition(':')[2] or m} {n}" for m, n in t.finished_by_model.items())
                 self.console.print(
                     f"{time.strftime('%H:%M:%S')} progress {t.done + t.failed}/{t.total} "
-                    f"(failed {t.failed}, running {len(t.active)}, ETA {_fmt_s(t.eta_s())})",
+                    f"(failed {t.failed}, ETA {_fmt_s(t.eta_s())})"
+                    + (f" · finished by model: {by_model}" if by_model else "")
+                    + (f" · running: {running}" if running else ""),
                     highlight=False,
                 )
 

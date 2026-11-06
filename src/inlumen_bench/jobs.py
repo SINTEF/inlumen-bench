@@ -20,7 +20,7 @@ from pathlib import Path
 
 from .config import bench_paths, resolve_data_dir, restore_owner
 from .events import Bus, read_events
-from .progress import ProgressTracker
+from .progress import ProgressTracker, request_text
 from .runner import Experiment, episode_state
 
 
@@ -30,6 +30,31 @@ CONTAINER_LABEL = "inlumen-bench.experiment"
 
 class JobBusy(Exception):
     pass
+
+
+RUN_LOG = "run.log"
+
+
+def log_line(experiment: Path, line: str, stamp: bool = True) -> None:
+    """Appends to the experiment's run log, which outlives the dashboard process."""
+    if stamp:
+        line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {line}"
+    try:
+        with (experiment / RUN_LOG).open("a") as handle:
+            handle.write(line + "\n")
+    except OSError:
+        pass
+
+
+def read_log(experiment: Path, lines: int = 60) -> list[str]:
+    path = experiment / RUN_LOG
+    if not path.is_file():
+        return []
+    start = max(0, path.stat().st_size - 64_000)
+    with path.open("rb") as handle:  # Only the end: the log grows for days.
+        handle.seek(start)
+        text = handle.read().decode(errors="replace").splitlines()
+    return (text[1:] if start else text)[-lines:]  # A mid-file start cuts the first line.
 
 
 def run_cli(log, stop: threading.Event, experiment: Path, *args: str) -> None:
@@ -51,14 +76,17 @@ def run_cli(log, stop: threading.Event, experiment: Path, *args: str) -> None:
         for line in proc.stdout:
             if line.strip():
                 log(line.rstrip())
+                log_line(experiment, line.rstrip(), stamp=False)
 
     reader = threading.Thread(target=pump, daemon=True)
+    log_line(experiment, f"started: bench {' '.join(args)}")
     reader.start()
     while proc.poll() is None:
         if stop.wait(0.3):
-            kill_run(proc, experiment, log)
+            kill_run(proc, experiment, lambda m: (log(m), log_line(experiment, m)))
             break
     reader.join(timeout=2)
+    log_line(experiment, "stopped from the dashboard" if stop.is_set() else f"ended (exit code {proc.returncode})")
     if not stop.is_set():
         shutil.rmtree(tmp, ignore_errors=True)
         if proc.returncode:
@@ -178,6 +206,7 @@ def snapshot(root: Path) -> dict:
             for event in read_events(ep_dir / "events.jsonl"):
                 tracker.on_event(event)
     now = time.monotonic()
-    active = [{"episode": v.episode_id, "phase": v.phase, "step": v.detail, "request": v.request,
-               "budget": v.budget, "elapsed_s": round(now - v.started, 1)} for v in tracker.active.values()]
+    active = [{"episode": v.episode_id, "model": v.model, "phase": v.phase, "step": v.detail,
+               "request": request_text(v, now), "budget": v.budget, "elapsed_s": round(now - v.started, 1)}
+              for v in tracker.active.values()]
     return {"total": len(exp.episodes()), "counts": counts, "active": active}

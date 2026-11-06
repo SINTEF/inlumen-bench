@@ -30,7 +30,6 @@ import random
 import shutil
 import threading
 import traceback
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -105,6 +104,11 @@ class Experiment:
     # Each applies to the `inlumen` method only (the baseline has no support to
     # switch off); empty means inLUMEN's defaults.
     conditions: list = field(default_factory=list)
+    # Runs of one model that may run at the same time. A local server (Ollama) answers one
+    # request per model at a time, so more only queue (and the wait counts as run time);
+    # with 1, parallel runs go to different models, each on its own GPU. Hosted APIs can
+    # take more.
+    runs_per_model: int = 1
 
     @property
     def design_source(self) -> str:
@@ -291,19 +295,96 @@ def pending_episodes(root: Path, exp: Experiment) -> list[dict]:
     return pending
 
 
+class ModelQueue:
+    """Hands out pending runs model by model, at most `per_model` of one model at a time.
+
+    A worker keeps to the model it last ran while that model has runs left, so each
+    model stays with one worker (and so one GPU on a local server) until it is done.
+    """
+
+    def __init__(self, todo: list[dict], per_model: int = 1) -> None:
+        self.runs: dict[str, list[dict]] = {}
+        for ep in todo:  # `todo` is already in model order.
+            self.runs.setdefault(ep["model"], []).append(ep)
+        self.active = {m: 0 for m in self.runs}
+        self.per_model = max(1, per_model)
+        self.lock = threading.Lock()
+
+    def take(self, prefer: str | None = None) -> dict | None:
+        with self.lock:
+            order = ([prefer] if prefer in self.runs else []) + list(self.runs)
+            for model in order:
+                if self.runs[model] and self.active[model] < self.per_model:
+                    self.active[model] += 1
+                    return self.runs[model].pop(0)
+            return None  # The rest belong to models other workers are running.
+
+    def release(self, ep: dict) -> bool:
+        """Marks a run done; True when that was the model's last run."""
+        with self.lock:
+            self.active[ep["model"]] -= 1
+            return not self.runs[ep["model"]] and not self.active[ep["model"]]
+
+    def progress(self, model: str) -> tuple[int, int]:
+        with self.lock:
+            return self.active[model], len(self.runs[model])
+
+
+def unload_model(profiles: dict, model: str, log: EventLog) -> None:
+    """Asks an Ollama server to unload a model that has no runs left, so the next model
+    gets its GPU instead of sharing another one. Other servers are left alone."""
+    import httpx
+
+    ref = ModelRef.parse(model)
+    profile = profiles.get(ref.profile)
+    if profile is None:
+        return
+    root = profile.base_url.rstrip("/").removesuffix("/v1")
+    try:
+        with httpx.Client(timeout=10) as client:
+            if "version" not in client.get(f"{root}/api/version").json():
+                return
+            client.post(f"{root}/api/generate", json={"model": ref.model, "keep_alive": 0}, timeout=60)
+        log.emit("log", message=f"{model}: all runs done; unloaded from Ollama")
+    except Exception:  # noqa: BLE001, S110 - not Ollama, or not reachable: nothing to free
+        pass
+
+
 def run_experiment(root: Path, corpus: Corpus, workers: int = 2, stop: threading.Event | None = None) -> None:
     exp = Experiment.load(root)
     todo = pending_episodes(root, exp)
     profiles = load_profiles()
     limits = Limits(**exp.limits)
+    queue = ModelQueue(todo, exp.runs_per_model)
+    log = EventLog(None)
+    errors: list[BaseException] = []
 
-    def task(ep: dict) -> None:
-        if stop and stop.is_set():
-            return
-        run_episode(root, corpus, exp, ep, profiles, limits)
+    def worker() -> None:
+        model = None
+        while not (stop and stop.is_set()):
+            ep = queue.take(prefer=model)
+            if ep is None:
+                return
+            if ep["model"] != model:
+                model = ep["model"]
+                log.emit("log", message=f"{model}: starting its runs ({sum(queue.progress(model))} left)")
+            try:
+                run_episode(root, corpus, exp, ep, profiles, limits)
+            except BaseException as exc:  # noqa: BLE001 - re-raised after the other workers stop
+                errors.append(exc)
+                return
+            finally:
+                if queue.release(ep):
+                    unload_model(profiles, model, log)
 
-    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        list(pool.map(task, todo))
+    threads = [threading.Thread(target=worker, name=f"run-worker-{i}", daemon=True)
+               for i in range(max(1, workers))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    if errors:
+        raise errors[0]
 
 
 def run_episode(root: Path, corpus: Corpus, exp: Experiment, ep: dict, profiles, limits: Limits) -> dict:

@@ -235,7 +235,10 @@ def run(
     max_cost: Optional[float] = typer.Option(None, help="USD per episode."),
     max_seconds: Optional[float] = typer.Option(None, help="Wall time per episode."),
     max_requests: Optional[int] = typer.Option(None, help="Model requests per episode."),
-    workers: int = typer.Option(2, help="Episodes in parallel."),
+    workers: int = typer.Option(2, help="Runs in parallel (models run one after another)."),
+    runs_per_model: int = typer.Option(
+        1, help="Runs of one model at a time. Keep 1 for a local Ollama (one request per model at a time); "
+                "parallel runs then go to different models, each on its own GPU."),
     grounding: str = typer.Option("on", help="Composition: metamodel grounding on, off or both (ablation)."),
     contracts: str = typer.Option("on", help="Implementation: explicit artifact contracts on, off or both."),
     repair: str = typer.Option("on", help="Implementation: the repair loop on, off or both."),
@@ -268,7 +271,7 @@ def run(
                                     design_models=design_model or None, name=name,
                                     cases=corpus.resolve_cases(case) if case or design_from == "reference" else [],
                                     methods=method, models=model, repetitions=reps, seed=seed, limits=limits,
-                                    conditions=conditions,
+                                    conditions=conditions, runs_per_model=runs_per_model,
                                     method_options={"inlumen": {"repair_attempts": repairs}} if step == "code" else {})
         except (FileExistsError, ValueError, KeyError, CorpusError) as exc:
             _fail(str(exc))

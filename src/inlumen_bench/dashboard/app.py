@@ -26,7 +26,7 @@ from inlumen_bench import __version__, results
 from inlumen_bench.config import resolve_data_dir
 from inlumen_bench.corpus import Corpus, CorpusError, fetch, setup
 from inlumen_bench.events import read_events
-from inlumen_bench.jobs import JobBusy, Jobs, kill_run, run_cli, snapshot
+from inlumen_bench.jobs import RUN_LOG, JobBusy, Jobs, kill_run, read_log, run_cli, snapshot
 from inlumen_bench.methods import METHODS
 from inlumen_bench.metrics import categorize
 from inlumen_bench.providers import PRESETS, Profile, load_profiles, remove_profile, upsert_profile
@@ -558,12 +558,17 @@ def live_progress(root: Path, name: str) -> None:
         column.metric(label, value)
     if snap["active"]:
         st.dataframe(pd.DataFrame(snap["active"]).rename(columns={"episode": "run", "step": "activity"}),
+                     column_order=["run", "model", "phase", "activity", "request", "budget", "elapsed_s"],
                      hide_index=True, width="stretch",
                      column_config={"elapsed_s": st.column_config.NumberColumn("time (s)", format="%.0f")})
     job = jobs().running_for(f"exp:{name}") or jobs().last_for(f"exp:{name}")
-    if job:
-        with st.expander(f"Log · {job['status']}", expanded=job["status"] == "failed"):
-            st.code("\n".join(job["log"][-40:]) or "—", language=None)
+    lines = read_log(root, 60) or (job["log"][-60:] if job else [])
+    if lines:
+        status = job["status"] if job else "from the run log"
+        with st.expander(f"Log · {status}", expanded=bool(job) and job["status"] == "failed"):
+            st.caption(f"Newest last. The full log is `{root / RUN_LOG}`; a summary line every 30 s "
+                       "lists what each running run is doing.")
+            st.code("\n".join(lines), language=None)
     # Refresh results and the run table when a run changes state.
     key = f"counts-{name}"
     current = json.dumps(counts, sort_keys=True)
@@ -911,10 +916,20 @@ def launch_page() -> None:
             st.caption(f"{len(numbers)} cases" + (f": {', '.join(numbers)}" if len(numbers) <= 20 else ""))
 
     st.subheader(f"{5 if phase == 'design' else 6} · Replicates and limits")
-    a, b, w = st.columns(3)
+    a, b, pm, w = st.columns(4)
     reps = a.number_input("Replicates", 1, 50, 5, help="Repetitions of each case × method × model × condition.")
-    workers = b.number_input("Runs in parallel", 1, 32, 2)
+    workers = b.number_input("Runs in parallel", 1, 32, 2,
+                             help="Runs at the same time. Models run one after another; with one run per model "
+                                  "at a time, parallel runs go to different models (each on its own GPU with "
+                                  "a local Ollama).")
+    per_model = pm.number_input("Runs per model at a time", 1, 32, 1,
+                                help="1 for a local server: Ollama answers one request per model at a time, so "
+                                     "more runs of one model only wait, and the wait counts as their time. "
+                                     "Hosted APIs (OpenRouter) can take more.")
     seed = w.number_input("Seed for the run order", value=0)
+    if models and int(workers) > len(models) * int(per_model):
+        st.caption(f":orange[Only {len(models) * int(per_model)} of the {int(workers)} parallel runs can be busy: "
+                   f"{len(models)} model{'s' if len(models) != 1 else ''} × {int(per_model)} run(s) per model.]")
     with st.expander("Limits per run", icon=":material/tune:"):
         l1, l2, l3, l4 = st.columns(4)
         max_cost = l1.number_input("Max cost (USD)", 0.0, value=2.0 if phase == "code" else 0.5, step=0.5)
@@ -958,7 +973,8 @@ def launch_page() -> None:
                 create_experiment(root, c, stage="design", name=name, cases=c.resolve_cases(numbers),
                                   models=models, repetitions=int(reps), seed=int(seed), limits=limits,
                                   conditions=conditions,
-                                  method_options={"inlumen": {"max_tool_iterations": int(tool_iterations)}})
+                                  method_options={"inlumen": {"max_tool_iterations": int(tool_iterations)}},
+                                  runs_per_model=int(per_model))
             else:
                 # inlumen-standalone reads max_repairs; inLUMEN's code generator, repair_attempts (0-6).
                 options = {m: {"max_repairs": int(repairs), "repair_attempts": int(repairs)}
@@ -967,7 +983,7 @@ def launch_page() -> None:
                                   design_models=sorted({d["model"] for d in designs}) or None, name=name,
                                   cases=c.resolve_cases(numbers), methods=methods, models=models,
                                   repetitions=int(reps), seed=int(seed), limits=limits, method_options=options,
-                                  conditions=conditions)
+                                  conditions=conditions, runs_per_model=int(per_model))
         except (FileExistsError, ValueError, KeyError, CorpusError) as exc:
             st.error(str(exc).strip("'\""))
             return
