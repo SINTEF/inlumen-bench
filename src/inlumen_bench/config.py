@@ -85,6 +85,17 @@ def bench_paths(data_dir: Path, runs_dir: Path | None = None) -> list[Path]:
     return paths + ([runs] if runs else []) + [config_dir()]
 
 
+def host_network() -> bool:
+    """Whether the container shares the host's network (BENCH_NETWORK=host in compose)."""
+    return os.environ.get("INLUMEN_BENCH_NETWORK") == "host"
+
+
+def dashboard_host() -> str:
+    """Where the dashboard listens: inside its own Docker network on every interface (compose
+    publishes the port on the host's localhost only); otherwise on localhost itself."""
+    return "0.0.0.0" if os.environ.get("INLUMEN_BENCH_IN_DOCKER") and not host_network() else "127.0.0.1"
+
+
 def restore_owner(*paths: Path) -> None:
     """Gives files back to INLUMEN_BENCH_OWNER (uid:gid) when running as root.
 
@@ -92,7 +103,7 @@ def restore_owner(*paths: Path) -> None:
     removes files its sandbox containers wrote as uid 65532. This keeps everything it
     leaves in the user's folders deletable by that user.
     """
-    owner = os.environ.get(OWNER_ENV)
+    owner = os.environ.get(OWNER_ENV, "").strip(":")  # compose passes ":" when unset
     if not owner or os.geteuid() != 0:
         return
     uid, gid = (int(x) for x in owner.split(":"))

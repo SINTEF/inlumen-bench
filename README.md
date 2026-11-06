@@ -57,7 +57,8 @@ scripts/bench-docker run pilot -c 016 --model openrouter:<model-id> -m inlumen -
 After changing the code, rebuild with `docker compose build` (or `docker build -t inlumen-bench:0.3.0 .`).
 
 ### Docker settings
-Put these in a `.env` file next to `compose.yaml` (all optional):
+There is one `docker-compose.yml` for a laptop and a server; what differs goes in a
+`.env` file next to it (all optional):
 ```sh
 BENCH_DATA_DIR=/Users/you/Documents/Datasets   # default ~/Documents/Datasets
 BENCH_RUNS_DIR=/Users/you/bench-runs    # default ./runs; absolute path
@@ -73,29 +74,37 @@ How it works:
   `<runs>/.tmp` for the same reason.
 - The dashboard is published on localhost only. It has no login and can start
   paid model runs, so do not expose it on a network. (Streamlit's startup log
-  prints "Network" and "External" URLs; they are not reachable, because the port
-  is bound to 127.0.0.1.)
+  prints "Network" and "External" URLs; they are not reachable.)
 - Local model servers on the host are reached as `host.docker.internal`; the
   `ollama` preset uses that automatically inside the container.
-- On Linux the container runs as root, so files it writes are owned by root.
 
 ### On a shared Linux server
-`compose.linux.yaml` makes the containers use the host's network, so a model server
-listening only on `127.0.0.1` (such as a system Ollama) is reachable at
-`http://127.0.0.1:11434/v1`; the dashboard then listens on the server's localhost only.
-The containers run as root, because ServiceCraft's evaluator has to remove files its
-sandbox containers write as uid 65532; after every command and dashboard job, bench
-gives the corpus folders, runs and config back to your user. In `.env` on the server:
+Add to `.env` on the server:
 ```sh
-COMPOSE_FILE=compose.yaml:compose.linux.yaml
+BENCH_NETWORK=host        # use the host's network
 BENCH_UID=1008            # id -u
 BENCH_GID=1008            # id -g
+BENCH_KEEP_IMAGES=1       # if a Kubernetes kubelet shares the Docker engine
 BENCH_PORT=8501
 ```
+- `BENCH_NETWORK=host`: a model server listening only on `127.0.0.1` (such as a
+  system Ollama) is reachable at `http://127.0.0.1:11434/v1`, and the dashboard itself
+  listens on the server's localhost only.
+- The containers run as root, because ServiceCraft's evaluator has to remove files its
+  sandbox containers write as uid 65532; after every command and dashboard job, bench
+  gives the corpus folders, runs and config back to `BENCH_UID:BENCH_GID`.
+- `BENCH_KEEP_IMAGES=1`: a kubelet deletes unused images when the disk is over 85%
+  full; bench keeps one idle container per evaluator image (`inlumen-bench-keep-*`)
+  so they count as in use, and rebuilds missing ones.
+
 Then `docker compose up -d --build` on the server, and from your own computer:
 ```sh
 ssh -N -L 8501:127.0.0.1:8501 you@server   # dashboard on http://localhost:8501
 ```
+To publish it on the web instead, run a Cloudflare Tunnel on the server (its own
+compose project, shared by every app there) with a route to `http://127.0.0.1:8501`,
+and put a Cloudflare Access login in front of that hostname first.
+
 For Ollama, prefer models with a long enough context (the `-16k` variants on a shared
 server, or `OLLAMA_CONTEXT_LENGTH` on your own); the default context silently cuts
 long prompts. Set the profile's parallel requests to what the server allows.
