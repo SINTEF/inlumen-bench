@@ -2,7 +2,7 @@
 # Runs one `bench` command inside the Docker image, with the same folders as the
 # dashboard started by `docker compose up`. Usage: scripts/bench-docker <bench arguments>
 #
-# Folders come from the environment, then from .env next to compose.yaml, then defaults:
+# Folders come from the environment, then from .env next to docker-compose.yml, then defaults:
 #   BENCH_DATA_DIR    datasets (default ~/Documents/Datasets)
 #   BENCH_RUNS_DIR    experiments (default ./runs in this repository)
 #   BENCH_CONFIG_DIR  config and endpoint profiles (default ~/.config/inlumen-bench)
@@ -30,6 +30,6 @@ BENCH_CONFIG_DIR="$(expand "$BENCH_CONFIG_DIR")"
 mkdir -p "$BENCH_RUNS_DIR/.tmp"
 export BENCH_DATA_DIR BENCH_RUNS_DIR BENCH_CONFIG_DIR
 
-# No -f: compose then reads COMPOSE_FILE from .env (compose.linux.yaml on Linux servers).
+# Compose reads the rest of .env (BENCH_NETWORK and so on) itself.
 cd "$repo"
 exec docker compose --progress quiet run --rm bench "$@"

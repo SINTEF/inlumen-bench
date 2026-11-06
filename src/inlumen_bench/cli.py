@@ -386,12 +386,17 @@ def status(name: str) -> None:
 
 @app.command()
 def serve(
-    host: str = typer.Option("127.0.0.1", help="Keep on localhost: the dashboard has no login."),
+    host: Optional[str] = typer.Option(
+        None, help="Default: localhost (inside Docker, the container's network; compose publishes it on "
+                   "localhost only). The dashboard has no login: don't expose it."),
     port: int = typer.Option(8000),
 ) -> None:
     """Start the Streamlit dashboard."""
     import sys
 
+    from inlumen_bench.config import dashboard_host
+
+    host = host or dashboard_host()
     app_path = Path(__file__).parent / "dashboard" / "app.py"
     runs = STATE["runs_dir"].resolve()
     runs.mkdir(parents=True, exist_ok=True)

@@ -15,10 +15,11 @@ from pathlib import Path
 from .config import config_dir, restore_owner
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1"
-# Inside the Docker image, "localhost" is the container, so local servers are reached via the host
-# (compose.linux.yaml uses the host's network and sets this back to 127.0.0.1).
+# Inside the Docker image, "localhost" is the container, so local servers are reached via the host,
+# unless the container shares the host's network (BENCH_NETWORK=host).
 LOCAL_HOST = os.environ.get("INLUMEN_BENCH_LOCAL_HOST") or (
-    "host.docker.internal" if os.environ.get("INLUMEN_BENCH_IN_DOCKER") else "localhost")
+    "127.0.0.1" if os.environ.get("INLUMEN_BENCH_NETWORK") == "host"
+    else "host.docker.internal" if os.environ.get("INLUMEN_BENCH_IN_DOCKER") else "localhost")
 
 PRESETS: dict[str, dict] = {
     "openrouter": {
