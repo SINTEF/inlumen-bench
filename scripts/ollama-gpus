@@ -1,76 +1,101 @@
 #!/usr/bin/env bash
 # One Ollama server per GPU, run as your own user (no sudo), so the bench can keep every
-# GPU busy: each server sees one GPU and holds one model at a time.
+# GPU busy: each server sees one GPU and holds one model at a time. Plus one server that
+# sees all GPUs, for a model too big for one GPU (it is split across them).
 #
-#   scripts/ollama-gpus start     start a server per GPU (ports 11435, 11436, ...)
+#   scripts/ollama-gpus start     start the servers (ports 11435, 11436, ..., then the
+#                                 all-GPU server on the next port, e.g. 11437)
 #   scripts/ollama-gpus stop      stop them
 #   scripts/ollama-gpus status    show each server and the model it has loaded
 #
-# The servers read the models of the system Ollama (read only: nothing is downloaded,
-# copied or deleted). Then list them as the profile's servers for runs, e.g.
+# The per-GPU servers read the models of the system Ollama (read only: nothing is
+# downloaded, copied or deleted). Then list them as the profile's servers for runs, e.g.
 #   bench providers add ollama --preset ollama \
 #     --endpoint http://127.0.0.1:11435/v1 --endpoint http://127.0.0.1:11436/v1
 # and run with as many runs in parallel as there are servers.
 #
+# The all-GPU server keeps its models in your own folder (~/ollama-models), so you can
+# download big models without sudo, e.g.
+#   OLLAMA_HOST=127.0.0.1:11437 ollama pull gpt-oss:120b
+# It starts only if that folder exists. Give it its own profile (base URL
+# http://127.0.0.1:11437/v1, one run in parallel). An idle server holds no GPU memory,
+# but while it runs a big model, leave the per-GPU servers idle (and the other way round).
+#
 # Settings (environment): OLLAMA_GPUS_FIRST_PORT (11435), OLLAMA_GPUS_MODELS (the system
-# Ollama's model folder), OLLAMA_GPUS_DIR (logs and pids, ~/.local/state/ollama-gpus),
+# Ollama's model folder), OLLAMA_GPUS_ALL_MODELS (the all-GPU server's model folder,
+# ~/ollama-models), OLLAMA_GPUS_DIR (logs and pids, ~/.local/state/ollama-gpus),
 # OLLAMA_GPUS (GPU indices, default: all GPUs nvidia-smi lists).
-# The servers keep running after you log out, but not after a reboot.
+# The servers keep running after you log out, but not after a reboot: run start again.
 set -euo pipefail
 
 first_port=${OLLAMA_GPUS_FIRST_PORT:-11435}
 models=${OLLAMA_GPUS_MODELS:-/usr/share/ollama/.ollama/models}
+all_models=${OLLAMA_GPUS_ALL_MODELS:-$HOME/ollama-models}
 state=${OLLAMA_GPUS_DIR:-$HOME/.local/state/ollama-gpus}
 gpus=${OLLAMA_GPUS:-$(nvidia-smi --query-gpu=index --format=csv,noheader | tr '\n' ' ')}
 
-running() { [[ -f "$state/gpu$1.pid" ]] && kill -0 "$(cat "$state/gpu$1.pid")" 2>/dev/null; }
+# Each server: "name port cuda_devices model_folder". GPU i is "gpu<i>", the last is "all".
+servers=()
+port=$first_port
+for gpu in $gpus; do
+  servers+=("gpu$gpu $port $gpu $models")
+  port=$((port + 1))
+done
+all_gpus=$(echo $gpus | tr ' ' ',')
+[[ -d "$all_models" ]] && servers+=("all $port $all_gpus $all_models")
+
+label() { [[ $1 == all ]] && echo "All GPUs ($all_gpus)" || echo "GPU ${1#gpu}"; }
+running() { [[ -f "$state/$1.pid" ]] && kill -0 "$(cat "$state/$1.pid")" 2>/dev/null; }
 
 start() {
   mkdir -p "$state"
-  local port=$first_port
-  for gpu in $gpus; do
-    if running "$gpu"; then
-      echo "GPU $gpu: already running on 127.0.0.1:$port"
-    else
-      # CUDA_VISIBLE_DEVICES hides the other GPUs from CUDA; Ollama would still reach them
-      # through Vulkan, so that is switched off. One model and one request at a time.
-      CUDA_VISIBLE_DEVICES=$gpu OLLAMA_VULKAN=0 OLLAMA_HOST=127.0.0.1:$port OLLAMA_MODELS=$models \
-        OLLAMA_NOPRUNE=1 OLLAMA_MAX_LOADED_MODELS=1 OLLAMA_NUM_PARALLEL=1 OLLAMA_KEEP_ALIVE=1h \
-        setsid nohup ollama serve >>"$state/gpu$gpu.log" 2>&1 </dev/null &
-      echo $! >"$state/gpu$gpu.pid"
-      for _ in $(seq 30); do
-        curl -fs "127.0.0.1:$port/api/version" >/dev/null && break
-        sleep 1
-      done
-      curl -fs "127.0.0.1:$port/api/version" >/dev/null \
-        && echo "GPU $gpu: started on http://127.0.0.1:$port/v1" \
-        || { echo "GPU $gpu: did not start, see $state/gpu$gpu.log" >&2; exit 1; }
+  local name port cuda folder
+  for server in "${servers[@]}"; do
+    read -r name port cuda folder <<<"$server"
+    if running "$name"; then
+      echo "$(label "$name"): already running on 127.0.0.1:$port"
+      continue
     fi
-    port=$((port + 1))
+    # CUDA_VISIBLE_DEVICES hides the other GPUs from CUDA; Ollama would still reach them
+    # through Vulkan, so that is switched off. One model and one request at a time.
+    CUDA_VISIBLE_DEVICES=$cuda OLLAMA_VULKAN=0 OLLAMA_HOST=127.0.0.1:$port OLLAMA_MODELS=$folder \
+      OLLAMA_NOPRUNE=1 OLLAMA_MAX_LOADED_MODELS=1 OLLAMA_NUM_PARALLEL=1 OLLAMA_KEEP_ALIVE=1h \
+      setsid nohup ollama serve >>"$state/$name.log" 2>&1 </dev/null &
+    echo $! >"$state/$name.pid"
+    for _ in $(seq 30); do
+      curl -fs "127.0.0.1:$port/api/version" >/dev/null && break
+      sleep 1
+    done
+    curl -fs "127.0.0.1:$port/api/version" >/dev/null \
+      && echo "$(label "$name"): started on http://127.0.0.1:$port/v1" \
+      || { echo "$(label "$name"): did not start, see $state/$name.log" >&2; exit 1; }
   done
 }
 
 stop() {
-  for gpu in $gpus; do
-    if running "$gpu"; then
-      kill "$(cat "$state/gpu$gpu.pid")" && echo "GPU $gpu: stopped"
+  local name rest
+  for server in "${servers[@]}"; do
+    read -r name rest <<<"$server"
+    if running "$name"; then
+      kill "$(cat "$state/$name.pid")" && echo "$(label "$name"): stopped"
     fi
-    rm -f "$state/gpu$gpu.pid"
+    rm -f "$state/$name.pid"
   done
 }
 
 status() {
-  local port=$first_port
-  for gpu in $gpus; do
-    if running "$gpu"; then
+  local name port rest loaded
+  for server in "${servers[@]}"; do
+    read -r name port rest <<<"$server"
+    if running "$name"; then
       loaded=$(curl -fs "127.0.0.1:$port/api/ps" | python3 -c \
         'import json,sys; print(", ".join(m["name"] for m in json.load(sys.stdin)["models"]) or "no model loaded")')
-      echo "GPU $gpu: http://127.0.0.1:$port/v1 · $loaded"
+      echo "$(label "$name"): http://127.0.0.1:$port/v1 · $loaded"
     else
-      echo "GPU $gpu: not running"
+      echo "$(label "$name"): not running"
     fi
-    port=$((port + 1))
   done
+  [[ -d "$all_models" ]] || echo "All GPUs: no $all_models folder, so not started"
 }
 
 case ${1:-status} in

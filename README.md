@@ -128,6 +128,19 @@ the next model, or a model has no runs left, the bench unloads it there. Each ru
 its server, and the dashboard shows it. Other users of the system Ollama (port 11434) can
 still load models onto these GPUs.
 
+For a model too big for one GPU (gpt-oss 120B, for example), the same script starts
+one more server, after the per-GPU ones (port 11437 with two GPUs), that sees all GPUs and
+splits the model across them. It keeps its models in your own folder, `~/ollama-models`
+(`OLLAMA_GPUS_ALL_MODELS`), so you can download big models without sudo, and it starts
+only if that folder exists:
+```sh
+mkdir -p ~/ollama-models && scripts/ollama-gpus start
+OLLAMA_HOST=127.0.0.1:11437 ollama pull gpt-oss:120b
+```
+Give it its own profile (base URL `http://127.0.0.1:11437/v1`, one run in parallel, no
+servers for runs). An idle server holds no GPU memory, but don't run the big model while
+the per-GPU servers run other models: they share the same GPUs.
+
 Without servers for runs, parallel runs go to different models instead: Ollama puts each
 model on its own GPU when it fits, but the last model runs alone on one GPU. Set the
 profile's parallel requests (per server) to at least the runs per model, or requests
