@@ -141,6 +141,11 @@ def _run(submission, inputs, prompt, work, emit, start, timeout_s, memory, cpus,
     for host, target, ro in mounts:
         args += ["--mount", f"type=bind,source={host},target={target}" + (",readonly" if ro else "")]
     args += ["--env", "BENCH_DIAGNOSTICS_DIR=/evidence/diag"]
+    # numpy's OpenBLAS (and OpenMP, MKL) size their thread pools from the host's CPUs, not
+    # --cpus: 64 threads per process on a 72-CPU host, past --pids-limit. Cap them.
+    threads = str(max(1, int(float(cpus))))
+    for var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        args += ["--env", f"{var}={threads}"]
     args += [image, "python", "/opt/evaluator/runtime_worker.py"]
 
     emit("validation_progress", message="load + run in Docker")
