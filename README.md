@@ -54,7 +54,7 @@ scripts/bench-docker datasets fetch
 scripts/bench-docker setup
 scripts/bench-docker run pilot -c 016 --model openrouter:<model-id> -m inlumen -m direct -n 3
 ```
-After changing the code, rebuild with `docker compose build` (or `docker build -t inlumen-bench:0.3.0 .`).
+After changing the code, rebuild with `docker compose build` (or `docker build -t inlumen-bench:0.3.1 .`).
 
 ### Docker settings
 There is one `docker-compose.yml` for a laptop and a server; what differs goes in a
@@ -175,7 +175,7 @@ authors' machine; it follows ServiceCraft's documented requalification workflow.
 ### Installing inLUMEN's agents
 The `inlumen` method imports [`inlumen-agents`](https://pypi.org/project/inlumen-agents/),
 which the `inlumen` extra installs from PyPI at the exact version pinned in
-`pyproject.toml` (currently `1.0.0b6.dev1`, a pre-release). The Docker image installs
+`pyproject.toml` (currently `1.0.0b6.dev2`, a pre-release). The Docker image installs
 the same extra. To benchmark another release, change the pin and rebuild.
 
 To try unreleased inLUMEN changes, install a checkout over the pinned release:
