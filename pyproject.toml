@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "inlumen-bench"
-version = "0.3.2"
+version = "0.3.3"
 description = "Generation driver and dashboard for benchmarking pipeline design and code generation on the ServiceCraft corpus."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -22,7 +22,7 @@ test = ["pytest>=8,<9"]
 evaluator = ["pydantic>=2,<3", "jsonschema==4.24.0"]
 # The `inlumen` method runs inLUMEN's own agents, published on PyPI. Pinned exactly:
 # experiments record this version, and it is a pre-release.
-inlumen = ["inlumen-agents[design,codegen]==1.0.0b6.dev2"]
+inlumen = ["inlumen-agents[design,codegen]==1.0.0b6.dev3"]
 
 [project.scripts]
 bench = "inlumen_bench.cli:app"
