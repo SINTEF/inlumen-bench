@@ -118,7 +118,8 @@ _CATEGORY_RULES: list[tuple[str, re.Pattern]] = [
     ("syntax", re.compile(r"invalid syntax|syntaxerror|indentationerror|parse error|unexpected eof", re.I)),
     # The model's reply could not be read (not the JSON or files asked for).
     ("format", re.compile(r"invalid json|jsondecodeerror|expecting .*delimiter|unterminated string|"
-                          r"not a valid (graph|naming)|reply is not|no definitions\.py|one json object", re.I)),
+                          r"not a valid (graph|naming)|reply is not|no definitions\.py|one json object|"
+                          r"no valid text response", re.I)),
     ("provider", re.compile(r"^model request:|http \d{3}|request failed after", re.I)),
     ("dependency", re.compile(r"no module named|modulenotfounderror|importerror|cannot import name|"
                               r"allowed package|requirement|reviewed dependency|pip install", re.I)),

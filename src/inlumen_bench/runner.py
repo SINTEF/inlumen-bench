@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import shutil
 import threading
 import traceback
@@ -45,6 +46,14 @@ from .methods import EpisodeContext, get_method
 from .providers import ModelRef, load_profiles
 
 FINAL_STATUSES = {"generated", "generation_failed", "evaluated", "designed"}
+
+# Errors inLUMEN's agents raise as plain exceptions that are the model's failure, not the
+# infrastructure's: e.g. after a tool call the model gave back no usable answer.
+MODEL_FAILURES = re.compile(r"produced no valid text response", re.I)
+
+
+def is_model_failure(error: str) -> bool:
+    return bool(MODEL_FAILURES.search(error or ""))
 TRACK_SHORT = {"natural_language": "nl", "fixed_graph": "fg"}
 STAGES = ("design", "code")
 DESIGN_METHOD = "inlumen"
@@ -521,7 +530,9 @@ def run_episode(root: Path, corpus: Corpus, exp: Experiment, ep: dict, profiles,
     except LLMError as exc:
         state.update(status="generation_failed", error=f"model request: {exc}", failed_phase=phase)
     except Exception as exc:  # Infrastructure problems are kept apart from method failures.
-        state.update(status="infra_error", error=f"{type(exc).__name__}: {exc}", failed_phase=phase)
+        error = f"{type(exc).__name__}: {exc}"
+        status = "generation_failed" if is_model_failure(error) else "infra_error"
+        state.update(status=status, error=error, failed_phase=phase)
         (ep_dir / "traceback.txt").write_text(traceback.format_exc())
 
     if ctx is not None:
@@ -573,6 +584,8 @@ def recompute(root: Path, corpus: Corpus) -> int:
         report = Path(state["evaluation_report"]) if state.get("evaluation_report") else None
         if report is not None and (report / "result.json").is_file():
             state["execution"] = metrics.execution_summary(json.loads((report / "result.json").read_text()), report)
+        if state.get("status") == "infra_error" and is_model_failure(state.get("error")):
+            state["status"] = "generation_failed"  # labelled before the bench knew it as a model failure
         if state.get("error") and state.get("status") == "generation_failed":
             state["failure_category"] = metrics.classify_failure(state["error"])
         record_usage(ep_dir, state)
