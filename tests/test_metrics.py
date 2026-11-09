@@ -321,3 +321,12 @@ def test_run_log_is_kept_in_the_experiment_folder(tmp_path):
         log_line(tmp_path, f"line {i}")
     assert [l.split(" ", 2)[2] for l in read_log(tmp_path, 3)] == ["line 2", "line 3", "line 4"]
     assert len(read_log(tmp_path)) == 5
+
+
+def test_empty_reply_after_a_tool_call_is_a_model_failure():
+    from inlumen_bench.runner import is_model_failure
+
+    error = "RuntimeError: RuntimeError: Reflect on tool use produced no valid text response."
+    assert is_model_failure(error)
+    assert metrics.classify_failure(error) == "format"
+    assert not is_model_failure("FileNotFoundError: design.json is missing")
