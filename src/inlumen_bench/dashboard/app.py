@@ -22,7 +22,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from inlumen_bench import __version__, results
+from inlumen_bench import __version__, columns, results
 from inlumen_bench.config import resolve_data_dir
 from inlumen_bench.corpus import Corpus, CorpusError, fetch, setup
 from inlumen_bench.events import read_events
@@ -220,6 +220,10 @@ def bulk_actions(bar, selected: list[str]) -> None:
     bar.download_button(f"Download runs {'of ' + label + ' ' if many else ''}(CSV)", results.to_csv(rows),
                         icon=":material/download:", file_name=f"{'experiments' if many else selected[0]}-runs.csv",
                         mime="text/csv", help="One row per run: conditions, complexity and every RQ1–RQ3 measure.")
+    if rows:
+        bar.download_button("Column descriptions (CSV)", columns.to_csv(list(rows[0])),
+                            icon=":material/description:", file_name="runs.columns.csv", mime="text/csv",
+                            help="What each column of the runs download means: group, unit and definition.")
     if many and running and bar.button(f"Stop {len(running)} running", icon=":material/stop_circle:"):
         for name in running:
             stop(name)
@@ -486,6 +490,9 @@ def cost_results(root: Path, exp: Experiment) -> None:
 
 
 def runs_tab(root: Path, exp: Experiment, rows: list[dict], running: bool) -> None:
+    with st.expander("What the columns of the runs download mean"):
+        st.dataframe(pd.DataFrame(columns.describe(list(columns.COLUMNS))), hide_index=True, width="stretch",
+                     column_config={"description": st.column_config.TextColumn(width="large")})
     f1, f2, f3 = st.columns([2, 1, 1])
     query = f1.text_input("Search", placeholder="case, method, model or error", key=f"q-{root.name}").lower()
     statuses = f2.multiselect("Status", sorted({r.get("status", "pending") for r in rows}),

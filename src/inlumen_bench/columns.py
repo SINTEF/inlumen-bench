@@ -1,0 +1,217 @@
+"""What each column of the per-run export means: group, unit and definition.
+
+`bench export` writes these next to the data (`<name>.columns.csv`) and the
+dashboard offers them as a download and a table. A test checks that every exported
+column is described here, so the two cannot drift apart.
+"""
+
+from __future__ import annotations
+
+import csv
+import io
+
+from .metrics import FAILURE_CATEGORIES, STATIC_TOOLS
+
+# (column, group, unit, description)
+_C: list[tuple[str, str, str, str]] = []
+
+
+def _add(group: str, rows: list[tuple[str, str, str]]) -> None:
+    _C.extend((name, group, unit, text) for name, unit, text in rows)
+
+
+SC = "ServiceCraft"
+_add("Run", [
+    ("experiment", "", "Experiment (folder name)."),
+    ("run", "", "Run identifier: case, method, model, composition source, condition and replicate."),
+    ("phase", "", "composition (RQ1) or implementation (RQ2: implementation and execution)."),
+    ("case", "", "ServiceCraft case identifier."),
+    ("case_number", "", "First three digits of the case identifier."),
+    ("method", "", "inlumen (inLUMEN's agents) or direct (one-request baseline)."),
+    ("model", "", "Model as endpoint profile:model name."),
+    ("replicate", "index", "Replicate number, from 0."),
+    ("condition", "", "Experimental condition in words, e.g. 'contracts · repair ×3', 'ungrounded', 'baseline'."),
+    ("composition_source", "", "Where the composition came from: 'prompt' (composed in this run), 'reference' "
+                               "(ServiceCraft's reference composition) or the composition run it was taken from."),
+    ("status", "", "Run status: designed or evaluated (finished), generated (waiting for scoring), "
+                   "generation_failed, infra_error, running or pending."),
+    ("outcome", "", "scored, failed (counts as a failure), infra (left out of rates) or pending."),
+    ("error", "", "Error message of a failed run."),
+    ("failure_category", "", "Category of the failure, by ordered rules on the message: "
+                             + ", ".join(FAILURE_CATEGORIES) + "."),
+])
+_add("Condition", [
+    ("grounded", "bool", "Composition: inLUMEN's metamodel-grounded design agent (true) or one plain model "
+                         "request without tools, catalog or validation (false)."),
+    ("artifact_contracts", "bool", "Implementation: components declare their output artifacts (true) or only "
+                                   "components and dependencies are given (false)."),
+    ("repair", "bool", "Implementation: inLUMEN's repair loop on validation failures is on."),
+    ("max_repair_attempts", "count", "Maximum repair attempts."),
+    ("sandbox", "", "Where inLUMEN runs generated code while validating (docker)."),
+    ("max_cost_usd", "USD", "Cost limit per run."),
+    ("max_seconds", "s", "Wall-time limit per run."),
+    ("max_requests", "count", "Model-request limit per run. A run that reaches any limit stops and fails "
+                              "(category budget)."),
+])
+_add("Complexity of the reference composition", [
+    ("ref_level", "", "low (≤ 4 components), medium (5–6) or high (≥ 7)."),
+    ("ref_components", "count", "Components."),
+    ("ref_dependencies", "count", "Dependencies between components."),
+    ("ref_inputs", "count", "Input files read."),
+    ("ref_outputs", "count", "Artifacts written."),
+    ("ref_longest_chain", "count", "Components on the longest dependency chain."),
+    ("ref_max_fan_out", "count", "Largest number of direct dependants of one component."),
+    ("ref_max_fan_in", "count", "Largest number of direct dependencies of one component."),
+    ("ref_branching_points", "count", "Components where the pipeline splits or joins."),
+    ("ref_topology", "", "ServiceCraft's topology label (linear, fan_in, fan_out, parallel, ...)."),
+])
+_add("RQ1 composition", [
+    ("components", "count", "Nodes in the generated composition graph (Sources and Destinations included)."),
+    ("sources", "count", "Source nodes."),
+    ("destinations", "count", "Destination nodes."),
+    ("dependencies", "count", "Edges in the generated composition graph."),
+    ("bindings", "count", "Parameter values set and files attached."),
+    ("design_components", "count", "Components of the composition compared with the reference."),
+    ("artifact_coverage", "0–1", "Reference artifacts written by some generated component / reference artifacts."),
+    ("task_recall", "0–1", "Task coverage: reference components matched by at least one generated component "
+                           "(a match writes at least one of the same artifacts) / reference components."),
+    ("task_one_to_one", "0–1", "Reference components matched by exactly one generated component that matches "
+                               "nothing else / reference components."),
+    ("dependency_recall", "0–1", "Reference dependencies whose two ends map one to one and are connected in "
+                                 "the composition / reference dependencies."),
+    ("binding_recall", "0–1", "Required inputs: reference (component ← input file) bindings found on the mapped "
+                              "component / reference bindings."),
+    ("design_correct", "0/1", "Complete design correctness: every component maps one to one, no extra "
+                              "components, every reference dependency found and no extra dependencies."),
+    ("missing_components", "count", "Reference components with no match."),
+    ("extra_components", "count", "Generated components that match no reference component."),
+    ("split_components", "count", "Reference components matched by several generated components."),
+    ("merged_components", "count", "Generated components matching several reference components."),
+    ("missing_dependencies", "count", "Reference dependencies not found."),
+    ("extra_dependencies", "count", "Dependencies between mapped components that the reference lacks."),
+    ("missing_bindings", "count", "Reference bindings not found."),
+    ("extra_bindings", "count", "Bindings on mapped components that the reference lacks."),
+    ("composition_operations", "count", "Tool calls of inLUMEN's design agent."),
+    ("failed_operations", "count", "Tool calls rejected by inLUMEN's checks."),
+    ("composition_repaired", "bool", "The design agent's validation repair round ran."),
+])
+_add("RQ2 validation and repair inside the method", [
+    ("attempts", "count", "Generation attempts; inLUMEN runs the pipeline on sample inputs after each "
+                          "(validation executions)."),
+    ("repairs", "count", "Repair attempts."),
+    ("first_passing_attempt", "index", "First attempt that passed inLUMEN's validation."),
+    ("initial_valid", "bool", "The first attempt passed inLUMEN's validation."),
+    ("final_valid", "bool", "The last attempt passed inLUMEN's validation."),
+    ("recovered_by_repair", "bool", "Failed at first, valid at the end."),
+    ("final_failure_reason", "", "Last validation failure of a run that stayed invalid."),
+    *[(f"feedback_{k}", "count", f"Validation failures of category '{k}' fed back to repair.")
+      for k in FAILURE_CATEGORIES],
+    ("public_validation", "", "The bench's public check of the final bundle (syntax, Dagster load, step "
+                              "failures, missing mandatory artifacts); recorded only, never fed back."),
+])
+_add(f"RQ2 execution ({SC})", [
+    ("dagster_loaded", "bool", "Dagster loaded the definitions (stage 3)."),
+    ("dagster_completed", "bool", "The Dagster run completed (stage 4)."),
+    ("failed_components", "", "Dagster steps that failed, ';'-separated."),
+    ("outputs_produced", "count", "Files the pipeline wrote."),
+    ("outputs_checked", "count", "Declared intermediate and final artifacts checked in stage 5."),
+    ("outputs_valid", "count", "Artifacts that passed their contract (existence, format, columns, keys)."),
+    ("outputs_compared", "count", "Declared outputs compared with private expected outputs (stage 6)."),
+    ("outputs_matching_reference", "count", "Outputs matching the expected values within tolerance."),
+    ("execution_failure_stage", "", "First stage that did not pass."),
+    ("definition_graph_score", "0–1", "Matched asset names and edges / (expected + unexpected ones); "
+                                      "needs the reference component names."),
+    ("stage_submission", "", "Stage 1, submission files: pass, fail, not_reached, timeout or infra_error."),
+    ("stage_static", "", "Stage 2, sources parse and static metrics are collected."),
+    ("stage_definition_graph", "", "Stage 3, Dagster loads and the asset graph equals the reference graph "
+                                   "(exact names and edges)."),
+    ("stage_execution", "", "Stage 4, the job runs to completion and asset checks pass."),
+    ("stage_contracts", "", "Stage 5, every declared artifact meets its contract."),
+    ("stage_oracle", "", "Stage 6, outputs match the private expected outputs."),
+    ("dagster_executable", "0/1", "Execution succeeded with task coverage."),
+    ("output_contract_valid", "0/1", "Stage 5 passed."),
+    ("behaviorally_correct", "0/1", "Stage 6 passed."),
+    ("complete_success", "0/1", "All six stages passed."),
+])
+_static = [
+    ("static_files", "count", "Python files measured (the whole submission)."),
+    ("static_physical_lines", "count", "Physical source lines."),
+    ("static_syntax_valid", "bool", "Every file parses."),
+]
+for tool in STATIC_TOOLS:
+    _static += [(f"static_{tool}_findings", "count", f"{tool} findings."),
+                (f"static_{tool}_flagged_lines", "count", f"Distinct lines with {tool} findings."),
+                (f"static_{tool}_line_fraction", "0–1", f"Lines with {tool} findings / physical lines "
+                                                         "(lower is better).")]
+_static += [
+    *[(f"static_pylint_{k}", "count", f"pylint findings of type {k}.")
+      for k in ("error", "warning", "refactor", "convention")],
+    *[(f"static_bandit_{k}", "count", f"bandit findings of severity {k}.") for k in ("high", "medium", "low")],
+    ("static_radon_blocks", "count", "Functions, methods and classes measured by radon."),
+    ("static_radon_mean_cc", "", "Mean cyclomatic complexity per block."),
+    ("static_radon_max_cc", "", "Highest cyclomatic complexity of a block."),
+    ("static_radon_mi", "0–100", "Mean maintainability index of the files (higher is better)."),
+    ("static_radon_mi_01", "0–1", "The same divided by 100."),
+]
+_add(f"RQ2 static diagnostics ({SC} stage 2)", _static)
+_add("RQ3 tokens and cost", [
+    ("requests", "count", "Model requests that returned (all phases)."),
+    ("failed_requests", "count", "Model requests that failed."),
+    ("input_tokens", "tokens", "Input tokens, as reported by the provider (failed runs and repairs included)."),
+    ("output_tokens", "tokens", "Output tokens, as reported by the provider."),
+    ("cached_input_tokens", "tokens", "Part of the input tokens served from the provider's cache, when reported."),
+    ("reasoning_tokens", "tokens", "Part of the output tokens spent on reasoning, when reported."),
+    ("usage_unavailable_requests", "count", "Requests whose provider reported no token usage."),
+    ("cost_usd", "USD", "Sum of provider-reported request costs; local models report none."),
+    ("cost_unavailable_requests", "count", "Requests without a reported cost."),
+])
+_add("RQ3 work performed", [
+    ("code_producing_requests", "count", "Requests that produce code (implementation and repair)."),
+    ("design_requests", "count", "Requests of the composition step."),
+    ("naming_requests", "count", "Requests of inLUMEN's naming pass (artifact names per component)."),
+    ("node_generations", "count", "Components whose code package was generated."),
+    ("design_repairs", "count", "Composition repair rounds."),
+])
+_phase = []
+for p in ("composition", "implementation", "repair"):
+    _phase += [(f"{p}_requests", "count", f"Model requests in the {p} phase (requests are assigned by purpose: "
+                                       "inLUMEN's repair requests count as repair)."),
+               (f"{p}_input_tokens", "tokens", f"Input tokens in the {p} phase."),
+               (f"{p}_output_tokens", "tokens", f"Output tokens in the {p} phase."),
+               (f"{p}_model_seconds", "s", f"Summed latency of the {p} phase's model requests.")]
+_add("RQ3 by phase", _phase)
+_add("RQ3 time", [
+    ("model_seconds", "s", "Summed latency of all model requests."),
+    ("composition_seconds", "s", "Wall time of the composition phase."),
+    ("implementation_seconds", "s", "Wall time of code generation; for inLUMEN this includes its own "
+                                    "validation and repair attempts (see the inLUMEN timings below)."),
+    ("repair_seconds", "s", "Wall time of a separate repair phase (methods that repair outside code "
+                            "generation; empty for inLUMEN and direct)."),
+    ("bundle_seconds", "s", "Wall time of assembling the Dagster bundle (no model)."),
+    ("validation_seconds", "s", "Wall time of the public validation."),
+    ("execution_seconds", "s", "Wall time of ServiceCraft's evaluation, from the run's events."),
+    ("generation_seconds", "s", "inLUMEN's own timing: pipeline generation."),
+    ("validation_and_repair_seconds", "s", "inLUMEN's own timing: validation and repair."),
+    ("compilation_seconds", "s", "inLUMEN's own timing: node compilation."),
+    ("construction_seconds", "s", "Construction time: composition + implementation + repair + bundle + "
+                                  "validation."),
+    ("dagster_step_seconds", "s", "Sum of Dagster step times in ServiceCraft's execution."),
+    ("evaluation_seconds", "s", "ServiceCraft's evaluation time for the run."),
+    ("wall_seconds", "s", "Wall time of the run in the bench (limits apply to this)."),
+])
+
+COLUMNS: dict[str, dict] = {name: {"group": group, "unit": unit, "description": text}
+                            for name, group, unit, text in _C}
+
+
+def describe(names: list[str]) -> list[dict]:
+    """Descriptions of the given columns, in their order."""
+    return [{"column": n, **COLUMNS.get(n, {"group": "", "unit": "", "description": ""})} for n in names]
+
+
+def to_csv(names: list[str]) -> str:
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=["column", "group", "unit", "description"])
+    writer.writeheader()
+    writer.writerows(describe(names))
+    return buffer.getvalue()

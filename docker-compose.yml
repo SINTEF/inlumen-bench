@@ -19,7 +19,7 @@
 # The dashboard has no login and can start paid model runs and containers, so it only
 # ever listens on localhost; reach a server's dashboard through an SSH tunnel.
 x-bench: &bench
-  image: inlumen-bench:0.3.3
+  image: inlumen-bench:0.3.4
   build: .
   network_mode: ${BENCH_NETWORK:-bridge}
   volumes:

@@ -54,7 +54,7 @@ scripts/bench-docker datasets fetch
 scripts/bench-docker setup
 scripts/bench-docker run pilot -c 016 --model openrouter:<model-id> -m inlumen -m direct -n 3
 ```
-After changing the code, rebuild with `docker compose build` (or `docker build -t inlumen-bench:0.3.3 .`).
+After changing the code, rebuild with `docker compose build` (or `docker build -t inlumen-bench:0.3.4 .`).
 
 ### Docker settings
 There is one `docker-compose.yml` for a laptop and a server; what differs goes in a
@@ -273,7 +273,11 @@ bench run rq2 --step code --design-from reference -m inlumen -m direct \
 ## What is recorded
 Every run's `episode.json` holds the condition and every measure, and
 `bench export` (or "Download runs (CSV)" in the dashboard) writes them as one row per
-run. Failed runs are kept and counted everywhere, including costs.
+run. Failed runs are kept and counted everywhere, including costs. Each column's group,
+unit and definition are written next to the export (`<name>.columns.csv`, also
+"Column descriptions (CSV)" in the dashboard), from `src/inlumen_bench/columns.py`.
+The evaluation protocol (design, conditions and every metric's definition) is in
+[docs/protocol.md](docs/protocol.md).
 
 **Conditions and complexity (all RQs)**: method, model, replicate, condition (with
 each mechanism's setting and the maximum repair attempts), limits, and the
@@ -310,7 +314,10 @@ high ≥ 7).
 - bundling and public validation, timed apart from generation and repair;
 - execution: whether Dagster loaded and completed the pipeline, which components
   failed, which outputs were produced, how many passed their contract (schema) and
-  matched the reference, and ServiceCraft's six stages.
+  matched the reference, ServiceCraft's six stages (each one's result) and its graph
+  score;
+- static diagnostics from ServiceCraft's static stage: flake8, pylint and bandit
+  findings (raw and per line), radon complexity and maintainability index.
 
 Rates reported: valid at the first attempt and at the end, and the share of initially
 failing runs recovered by repair (from the method's own validation, which runs the
@@ -318,7 +325,7 @@ pipeline on sample inputs); executable, valid outputs, expected outputs and comp
 success (from ServiceCraft). The condition without repair gives ServiceCraft's
 first-attempt rates directly.
 
-**RQ3, cost**: input and output tokens and cost of every request (failed ones and
+**RQ3, cost**: input, output, cached input and reasoning tokens and cost of every request (failed ones and
 repairs included), split by phase (composition, implementation, repair); wall time
 per phase (composition, implementation, repair, bundle, validation) and their sum as
 construction time; Dagster execution time apart. Reported per cell: cost and tokens

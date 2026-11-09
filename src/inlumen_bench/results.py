@@ -17,12 +17,19 @@ import statistics
 from math import comb
 from pathlib import Path
 
-from .metrics import FAILURE_CATEGORIES
+from .metrics import EVALUATION_STAGES, FAILURE_CATEGORIES, STATIC_TOOLS
 from .runner import Experiment, episode_state
 
 SCORE_KEYS = ("dagster_executable", "output_contract_valid", "behaviorally_correct", "complete_success")
 DESIGN_KEYS = ("artifact_coverage", "task_recall", "task_one_to_one", "dependency_recall", "binding_recall",
                "design_correct")
+STATIC_KEYS = ("files", "physical_lines", "syntax_valid",
+               *(f"{t}_{k}" for t in STATIC_TOOLS for k in ("findings", "flagged_lines", "line_fraction")),
+               "pylint_error", "pylint_warning", "pylint_refactor", "pylint_convention",
+               "bandit_high", "bandit_medium", "bandit_low",
+               "radon_blocks", "radon_mean_cc", "radon_max_cc", "radon_mi", "radon_mi_01")
+COUNTER_KEYS = ("code_producing_requests", "design_requests", "naming_requests", "node_generations",
+                "design_repairs")
 # Seconds of pipeline construction: everything before Dagster runs the pipeline.
 CONSTRUCTION_PHASES = ("composition", "implementation", "repair", "bundle", "validation")
 DEFAULT_GROUPS = ("method", "model", "design", "condition")
@@ -198,6 +205,9 @@ def run_row(experiment: str, row: dict) -> dict:
     seconds = (row.get("phases") or {}).get("seconds") or {}
     stage_s = impl.get("stage_seconds") or {}
     scores = row.get("scores") or {}
+    stages = row.get("stages") or {}
+    static = row.get("static") or {}
+    counters = row.get("counters") or {}
     out = {
         "experiment": experiment, "run": row.get("id"),
         "phase": "composition" if row.get("stage") == "design" else "implementation",
@@ -250,10 +260,19 @@ def run_row(experiment: str, row: dict) -> dict:
         "outputs_compared": ex.get("outputs_compared"),
         "outputs_matching_reference": ex.get("outputs_matching_reference"),
         "execution_failure_stage": ex.get("failure_stage"),
+        "definition_graph_score": ex.get("definition_graph_score"),
+        **{f"stage_{k}": stages.get(k) for k in EVALUATION_STAGES},
         **{k: scores.get(k) for k in SCORE_KEYS},
+        # RQ2: static diagnostics of the submission (ServiceCraft's static stage)
+        **{f"static_{k}": static.get(k) for k in STATIC_KEYS},
         # RQ3: tokens, cost and time
         "requests": usage.get("requests"), "failed_requests": usage.get("failed_requests"),
         "input_tokens": usage.get("input_tokens"), "output_tokens": usage.get("output_tokens"),
+        "cached_input_tokens": usage.get("cached_input_tokens"), "reasoning_tokens": usage.get("reasoning_tokens"),
+        "usage_unavailable_requests": usage.get("usage_unavailable"),
+        "model_seconds": usage.get("request_seconds"),
+        # work performed
+        **{k: counters.get(k) for k in COUNTER_KEYS},
         "cost_usd": usage.get("cost_usd"), "cost_unavailable_requests": usage.get("cost_unavailable"),
         **{f"{p}_{k}": (phases.get(p) or {}).get(k) for p in ("composition", "implementation", "repair")
            for k in ("requests", "input_tokens", "output_tokens", "model_seconds")},
