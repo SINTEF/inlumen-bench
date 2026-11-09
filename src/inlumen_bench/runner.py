@@ -583,7 +583,11 @@ def recompute(root: Path, corpus: Corpus) -> int:
             state["design_score"] = design_score.score(json.loads((work / "design.json").read_text()), reference)
         report = Path(state["evaluation_report"]) if state.get("evaluation_report") else None
         if report is not None and (report / "result.json").is_file():
-            state["execution"] = metrics.execution_summary(json.loads((report / "result.json").read_text()), report)
+            result = json.loads((report / "result.json").read_text())
+            state["execution"] = metrics.execution_summary(result, report)
+            state["static"] = metrics.static_summary(result)
+            state.setdefault("stages", {name: (result.get("stages") or {}).get(name, {}).get("status")
+                                        for name in metrics.EVALUATION_STAGES})
         if state.get("status") == "infra_error" and is_model_failure(state.get("error")):
             state["status"] = "generation_failed"  # labelled before the bench knew it as a model failure
         if state.get("error") and state.get("status") == "generation_failed":

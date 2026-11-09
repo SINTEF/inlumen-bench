@@ -330,3 +330,40 @@ def test_empty_reply_after_a_tool_call_is_a_model_failure():
     assert is_model_failure(error)
     assert metrics.classify_failure(error) == "format"
     assert not is_model_failure("FileNotFoundError: design.json is missing")
+
+
+def test_every_exported_column_is_described():
+    from inlumen_bench.columns import COLUMNS, to_csv as columns_csv
+
+    names = list(run_row("x", {"id": "a", "status": "pending"}))
+    missing = [n for n in names if n not in COLUMNS]
+    assert not missing, f"columns without a description: {missing}"
+    assert not [n for n in COLUMNS if n not in names], "described columns that are not exported"
+    assert all(COLUMNS[n]["description"] for n in names)
+    assert columns_csv(names).splitlines()[0] == "column,group,unit,description"
+
+
+def test_static_summary_and_stages_reach_the_export():
+    result = {"stages": {"static": {
+        "status": "pass", "syntax_valid": True, "files": 1, "physical_lines": 155,
+        "tools": {"flake8": {"raw": {"findings": 56, "distinct_flagged_physical_lines": 53}},
+                  "pylint": {"raw": {"findings": 63, "distinct_flagged_physical_lines": 52,
+                                     "counts_by_type": {"error": 0, "warning": 14, "refactor": 1, "convention": 48}}},
+                  "bandit": {"raw": {"findings": 1, "distinct_flagged_physical_lines": 1,
+                                     "counts_by_severity": {"HIGH": 0, "MEDIUM": 0, "LOW": 1}}},
+                  "radon": {"raw": {"block_count": 17, "mean_cc": 1.0, "max_cc": 1,
+                                    "mean_file_maintainability_index": 39.5}}},
+        "scaled_metrics": {"flake8_finding_line_fraction": {"value": 0.342},
+                           "radon_maintainability_index_01": {"value": 0.395}}}}}
+    static = metrics.static_summary(result)
+    assert static["flake8_findings"] == 56 and static["flake8_line_fraction"] == 0.342
+    assert static["pylint_warning"] == 14 and static["bandit_low"] == 1 and static["radon_mi_01"] == 0.395
+    assert metrics.static_summary({}) == {}
+    row = run_row("x", {"id": "a", "status": "evaluated", "static": static,
+                        "stages": {"submission": "pass", "definition_graph": "fail"},
+                        "usage": {"cached_input_tokens": 7, "reasoning_tokens": 3},
+                        "counters": {"node_generations": 4}})
+    assert row["static_physical_lines"] == 155 and row["static_radon_max_cc"] == 1
+    assert row["stage_submission"] == "pass" and row["stage_definition_graph"] == "fail"
+    assert row["stage_oracle"] is None
+    assert row["cached_input_tokens"] == 7 and row["reasoning_tokens"] == 3 and row["node_generations"] == 4

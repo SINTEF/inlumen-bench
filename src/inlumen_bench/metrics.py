@@ -213,6 +213,43 @@ def phase_usage(events: list[dict]) -> dict:
     return {"by_phase": usage, "seconds": {k: round(v, 2) for k, v in wall.items() if v >= 0.01}}
 
 
+# ---- static diagnostics (RQ2) -------------------------------------------------------
+
+STATIC_TOOLS = ("flake8", "pylint", "bandit")
+EVALUATION_STAGES = ("submission", "static", "definition_graph", "execution", "contracts", "oracle")
+
+
+def static_summary(result: dict) -> dict:
+    """ServiceCraft's static stage: raw tool counts and its scaled metrics, flattened.
+
+    Measured on every Python file of the submission, so a bundle with generated
+    support files (inLUMEN's packages and harness) is measured as a whole.
+    """
+    static = (result.get("stages") or {}).get("static") or {}
+    if not static:
+        return {}
+    tools = static.get("tools") or {}
+    scaled = static.get("scaled_metrics") or {}
+    out = {"files": static.get("files"), "physical_lines": static.get("physical_lines"),
+           "syntax_valid": static.get("syntax_valid")}
+    for tool in STATIC_TOOLS:
+        raw = (tools.get(tool) or {}).get("raw") or {}
+        out[f"{tool}_findings"] = raw.get("findings")
+        out[f"{tool}_flagged_lines"] = raw.get("distinct_flagged_physical_lines")
+        out[f"{tool}_line_fraction"] = (scaled.get(f"{tool}_finding_line_fraction") or {}).get("value")
+    pylint = ((tools.get("pylint") or {}).get("raw") or {}).get("counts_by_type") or {}
+    for kind in ("error", "warning", "refactor", "convention"):
+        out[f"pylint_{kind}"] = pylint.get(kind)
+    bandit = ((tools.get("bandit") or {}).get("raw") or {}).get("counts_by_severity") or {}
+    for severity in ("HIGH", "MEDIUM", "LOW"):
+        out[f"bandit_{severity.lower()}"] = bandit.get(severity)
+    radon = (tools.get("radon") or {}).get("raw") or {}
+    out.update(radon_blocks=radon.get("block_count"), radon_mean_cc=radon.get("mean_cc"),
+               radon_max_cc=radon.get("max_cc"), radon_mi=radon.get("mean_file_maintainability_index"),
+               radon_mi_01=(scaled.get("radon_maintainability_index_01") or {}).get("value"))
+    return out
+
+
 # ---- execution (RQ2) ---------------------------------------------------------------
 
 _STEP_TIME = re.compile(r"Finished execution of step \"?([^\" ]+)\"? in ([\d.]+)(ms|s)")

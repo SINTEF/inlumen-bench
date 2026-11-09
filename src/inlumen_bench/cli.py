@@ -351,7 +351,11 @@ def recompute_cmd(names: list[str] = typer.Argument(None, help="Experiments; def
 def export(names: list[str] = typer.Argument(None, help="Experiments; default: all."),
            output: Path = typer.Option(Path("runs.csv"), "--output", "-o", help=".csv or .jsonl"),
            ) -> None:
-    """One row per run with conditions, complexity and every RQ1–RQ3 measure."""
+    """One row per run with conditions, complexity and every RQ1–RQ3 measure.
+
+    The column descriptions (group, unit, definition) go next to it, in
+    `<name>.columns.csv`."""
+    from . import columns
     from .results import export_rows, to_csv, to_jsonl
 
     runs = STATE["runs_dir"]
@@ -359,7 +363,10 @@ def export(names: list[str] = typer.Argument(None, help="Experiments; default: a
              else sorted(p.parent for p in runs.glob("*/experiment.json")))
     rows = export_rows(roots)
     output.write_text(to_jsonl(rows) if output.suffix == ".jsonl" else to_csv(rows))
-    console.print(f"{len(rows)} runs from {len(roots)} experiments → {output}")
+    described = output.with_name(output.stem + ".columns.csv")
+    if rows:
+        described.write_text(columns.to_csv(list(rows[0])))
+    console.print(f"{len(rows)} runs from {len(roots)} experiments → {output} (columns: {described.name})")
 
 
 @app.command()

@@ -15,7 +15,7 @@ from pathlib import Path
 
 from .corpus import Corpus, CorpusError, ensure_images
 from .events import EventLog
-from .metrics import execution_summary
+from .metrics import execution_summary, static_summary
 from .runner import Experiment, _write_state, episode_state, record_usage
 
 POLL_S = 2.0
@@ -121,7 +121,9 @@ def evaluate_experiment(root: Path, corpus: Corpus, log=print) -> Path | None:
                      evaluation_report=str(report) if report else None)
         if report is not None and (report / "result.json").is_file():
             # RQ2: did Dagster load and complete the pipeline, what it produced.
-            state["execution"] = execution_summary(json.loads((report / "result.json").read_text()), report)
+            result = json.loads((report / "result.json").read_text())
+            state["execution"] = execution_summary(result, report)
+            state["static"] = static_summary(result)
         if row.get("status") == "evaluated":
             state["status"] = "evaluated"
         events[ep_dir.name].emit("phase_finished", phase="evaluate", scores=row.get("scores"))
