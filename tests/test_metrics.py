@@ -340,7 +340,42 @@ def test_every_exported_column_is_described():
     assert not missing, f"columns without a description: {missing}"
     assert not [n for n in COLUMNS if n not in names], "described columns that are not exported"
     assert all(COLUMNS[n]["description"] for n in names)
-    assert columns_csv(names).splitlines()[0] == "column,group,unit,description"
+    header = columns_csv(names).splitlines()[0]
+    assert header == "where,column,description,unit,group,in the runs CSV,in the dashboard tables"
+
+
+def test_dashboard_tables_are_described_under_their_shown_names():
+    import ast
+    from pathlib import Path
+
+    from inlumen_bench import columns
+
+    names = set(run_row("x", {"id": "a", "status": "pending"}))
+    for table, rows in columns.TABLES.items():
+        for label, sources, _unit, text in rows:
+            assert text, f"{table}: {label} has no description"
+            for src in (s.strip() for s in sources.split(",")):
+                assert src in names, f"{table}: {label} points to {src}, which the runs CSV does not have"
+    # Every column the dashboard's tables show (string keys of the dicts they are built from) is described.
+    app = Path(__file__).parents[1] / "src/inlumen_bench/dashboard/app.py"
+    tree = ast.parse(app.read_text())
+    described = {label for rows in columns.TABLES.values() for label, *_ in rows}
+    funcs = {"_base_columns", "composition_results", "implementation_results", "cost_results", "runs_tab"}
+    shown = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name in funcs:
+            for d in ast.walk(node):
+                if isinstance(d, ast.Dict):
+                    shown |= {k.value for k in d.keys if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+                    shown |= {k.values[0].value for k in d.keys if isinstance(k, ast.JoinedStr)
+                              and isinstance(k.values[0], ast.Constant)
+                              and k.values[0].value.startswith("cost /")}
+    # Keys of dicts that are not table columns: value maps and column settings.
+    ignore = {"reference", "own", "reviewed", "group", "phase", "tokens", "category", "failures", "cost / ",
+              "low", "medium", "high", "description"}
+    missing = sorted(c for c in shown - described - ignore if " / " not in c or c in ("cost / run", "tokens / run"))
+    assert not missing, f"dashboard columns without a description: {missing}"
+    assert "executable" in columns.SHOWN_AS["dagster_executable"]
 
 
 def test_static_summary_and_stages_reach_the_export():

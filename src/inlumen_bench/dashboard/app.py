@@ -51,6 +51,29 @@ METHOD_HELP = {"inlumen": "inLUMEN's own agents (contract-bounded generation and
                "inlumen-standalone": "The bench's earlier reimplementation (kept for old experiments)."}
 PERCENT = st.column_config.NumberColumn(format="%.1f%%")
 
+
+def _help_key(label: str) -> str:
+    return "pass@k" if label.startswith("pass@") and label != "pass@1" else label
+
+
+def table_config(table: str, frame: pd.DataFrame, percent=()) -> dict:
+    """Column settings with each column's description as its header tooltip."""
+    texts = columns.table_help(table)
+    return {c: (st.column_config.NumberColumn(format="%.1f%%", help=texts.get(_help_key(c)))
+                if c in percent else st.column_config.Column(help=texts.get(_help_key(c))))
+            for c in frame.columns}
+
+
+def show_table(table: str, frame: pd.DataFrame, percent=(), **kwargs):
+    """A results table, its tooltips, and below it what each of its columns means."""
+    shown = st.dataframe(frame, hide_index=True, width="stretch",
+                         column_config=table_config(table, frame, percent), **kwargs)
+    with st.expander("What these columns mean"):
+        st.dataframe(pd.DataFrame(columns.describe_table(table, [_help_key(c) for c in frame.columns])),
+                     hide_index=True, width="stretch",
+                     column_config={"description": st.column_config.TextColumn(width="large")})
+    return shown
+
 st.set_page_config(page_title="inlumen-bench", page_icon=":material/science:", layout="wide")
 
 
@@ -223,7 +246,8 @@ def bulk_actions(bar, selected: list[str]) -> None:
     if rows:
         bar.download_button("Column descriptions (CSV)", columns.to_csv(list(rows[0])),
                             icon=":material/description:", file_name="runs.columns.csv", mime="text/csv",
-                            help="What each column of the runs download means: group, unit and definition.")
+                            help="What every column means: the dashboard tables under the names they show, then each "
+                                 "column of the runs download, with the links between the two.")
     if many and running and bar.button(f"Stop {len(running)} running", icon=":material/stop_circle:"):
         for name in running:
             stop(name)
@@ -337,9 +361,9 @@ def composition_results(root: Path) -> None:
         "fully correct": as_percent(df["design_design_correct"]),
         "operations / run": num(df["mean_operations"]),
     })
-    st.dataframe(table, hide_index=True, width="stretch", column_config={
-        c: PERCENT for c in ("valid composition", "outputs covered", "components found", "one-to-one",
-                             "dependencies found", "bindings found", "fully correct")})
+    show_table("Composition (RQ1)", table, percent=(
+        "valid composition", "outputs covered", "components found", "one-to-one", "dependencies found",
+        "bindings found", "fully correct"))
     st.caption("A composition is valid when it passes the structural check (every mandatory output written once, "
                "known inputs, no cycles). Comparison with the reference composition matches components by the "
                "outputs they write (provisional): components, dependencies and bindings (which input each "
@@ -383,20 +407,19 @@ def implementation_results(root: Path, exp: Experiment) -> None:
     df = pd.DataFrame(summary)
     k = next((c for c in df.columns if c.startswith("pass@") and c != "pass@1"), None)
     st.markdown("**Implementation**: does the method's own validation pass, and does repair recover failures?")
-    st.dataframe(pd.DataFrame({
+    show_table("Implementation (RQ2)", pd.DataFrame({
         **_base_columns(df, exp),
         "valid at first attempt": as_percent(df["initial_valid"]),
         "valid at the end": as_percent(df["final_valid"]),
         "recovered by repair": as_percent(df["recovered_by_repair"]),
         "attempts / run": num(df["mean_attempts"]),
-    }), hide_index=True, width="stretch", column_config={
-        c: PERCENT for c in ("valid at first attempt", "valid at the end", "recovered by repair")})
+    }), percent=("valid at first attempt", "valid at the end", "recovered by repair"))
     st.caption("From the method's validation trace (inLUMEN validates by running the pipeline on sample inputs "
                "in its sandbox). Recovered by repair: share of runs failing their first attempt that pass in the "
                "end. The baseline has no validation, so these are empty for it; compare it on execution below. "
                "To measure ServiceCraft's first-attempt rates, add the condition without repair.")
     st.markdown("**Execution** (ServiceCraft runs the Dagster bundle)")
-    st.dataframe(pd.DataFrame({
+    show_table("Execution (RQ2)", pd.DataFrame({
         **_base_columns(df, exp),
         "Dagster loaded": as_percent(df["dagster_loaded"]),
         "executable": as_percent(df["dagster_executable"]),
@@ -407,9 +430,8 @@ def implementation_results(root: Path, exp: Experiment) -> None:
                        for m, s in zip(df["success_mean"], df["success_std"])],
         "pass@1": as_percent(df["pass@1"]),
         **({k: as_percent(df[k])} if k else {}),
-    }), hide_index=True, width="stretch", column_config={
-        c: PERCENT for c in ("Dagster loaded", "executable", "outputs valid", "outputs as expected",
-                             "complete success", "pass@1", k) if c})
+    }), percent=tuple(c for c in ("Dagster loaded", "executable", "outputs valid", "outputs as expected",
+                                  "complete success", "pass@1", k) if c))
     note = ("Rates use every finished run (generation failures count as failures); pending runs and "
             "infrastructure errors are left out. Executable: Dagster completed the run; outputs valid: every "
             "output passed its contract (schema); as expected: outputs match the reference behaviour.")
@@ -441,7 +463,7 @@ def cost_results(root: Path, exp: Experiment) -> None:
         return
     df = pd.DataFrame(summary)
     success = "valid composition" if exp.stage == "design" else "success"
-    st.dataframe(pd.DataFrame({
+    show_table("Cost and time (RQ3)", pd.DataFrame({
         **_base_columns(df, exp),
         "cost": [usd(v) + (" + ?" if inc else "") for v, inc in zip(df["cost_usd"], df["cost_incomplete"])],
         "cost / run": [usd(v) for v in df["cost_per_run"]],
@@ -450,7 +472,7 @@ def cost_results(root: Path, exp: Experiment) -> None:
         f"tokens / {success}": num(df["tokens_per_success"]),
         "median construction": [secs(v) for v in df["median_construction_s"]],
         **({"median execution": [secs(v) for v in df["median_execution_s"]]} if exp.stage == "code" else {}),
-    }), hide_index=True, width="stretch")
+    }))
     st.caption("Failed runs are included in every cost. Construction time covers composition, implementation, "
                "repair, bundling and validation; Dagster execution is reported apart. \"+ ?\" marks cells where "
                "the provider reported no cost for some requests (local models report none).")
@@ -477,20 +499,23 @@ def cost_results(root: Path, exp: Experiment) -> None:
         order = {"low": 0, "medium": 1, "high": 2}
         lv = lv.assign(_o=lv["complexity_level"].map(order)).sort_values(["method", "condition", "_o"])
         rate = "valid_design" if exp.stage == "design" else "complete_success"
-        st.dataframe(pd.DataFrame({
+        show_table("By complexity (RQ3)", pd.DataFrame({
             "method": lv["method"], "condition": lv["condition"], "complexity": lv["complexity_level"],
             "runs": lv["episodes"], success: as_percent(lv[rate]),
             "tokens / run": num(lv["tokens_per_run"]), f"tokens / {success}": num(lv["tokens_per_success"]),
             "cost / run": [usd(v) for v in lv["cost_per_run"]],
             "median construction": [secs(v) for v in lv["median_construction_s"]],
-        }), hide_index=True, width="stretch", column_config={success: PERCENT})
+        }), percent=(success,))
         st.caption("Levels by the number of components in the reference composition: low ≤ 4, medium 5–6, "
                    "high ≥ 7. The exported CSV has every complexity measure (dependencies, longest chain, "
                    "fan-in, fan-out, branching points).")
 
 
 def runs_tab(root: Path, exp: Experiment, rows: list[dict], running: bool) -> None:
-    with st.expander("What the columns of the runs download mean"):
+    with st.expander("What the columns of this list mean"):
+        st.dataframe(pd.DataFrame(columns.describe_table("Runs")), hide_index=True, width="stretch",
+                     column_config={"description": st.column_config.TextColumn(width="large")})
+    with st.expander("What the columns of the runs download (CSV) mean"):
         st.dataframe(pd.DataFrame(columns.describe(list(columns.COLUMNS))), hide_index=True, width="stretch",
                      column_config={"description": st.column_config.TextColumn(width="large")})
     f1, f2, f3 = st.columns([2, 1, 1])
@@ -512,9 +537,9 @@ def runs_tab(root: Path, exp: Experiment, rows: list[dict], running: bool) -> No
             "operations": (r.get("composition_trace") or {}).get("operations")} if is_design else
            {"attempts": (r.get("implementation") or {}).get("attempts"),
             **{label: _score(r, key) for key, label in (("dagster_executable", "executable"),
-                                                        ("output_contract_valid", "outputs"),
-                                                        ("behaviorally_correct", "expected"),
-                                                        ("complete_success", "success"))}}),
+                                                        ("output_contract_valid", "outputs valid"),
+                                                        ("behaviorally_correct", "outputs as expected"),
+                                                        ("complete_success", "complete success"))}}),
         "cost": usd((r.get("usage") or {}).get("cost_usd")),
         "time": secs((r.get("budget") or {}).get("elapsed_s")),
         "error": r.get("error") or "",
@@ -524,7 +549,8 @@ def runs_tab(root: Path, exp: Experiment, rows: list[dict], running: bool) -> No
         return
     st.caption(f"{len(shown)} of {len(rows)} runs. Select one to see its details, or several to delete them.")
     picked = st.dataframe(table, hide_index=True, width="stretch", on_select="rerun", selection_mode="multi-row",
-                          key=f"runs-{root.name}-{st.session_state.get('list_version', 0)}")
+                          key=f"runs-{root.name}-{st.session_state.get('list_version', 0)}",
+                          column_config=table_config("Runs", table))
     selected = [table.iloc[i]["run"] for i in picked.selection.rows]
     if not selected:
         return
