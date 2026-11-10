@@ -54,7 +54,7 @@ scripts/bench-docker datasets fetch
 scripts/bench-docker setup
 scripts/bench-docker run pilot -c 016 --model openrouter:<model-id> -m inlumen -m direct -n 3
 ```
-After changing the code, rebuild with `docker compose build` (or `docker build -t inlumen-bench:0.3.4 .`).
+After changing the code, rebuild with `docker compose build` (or `docker build -t inlumen-bench:0.3.5 .`).
 
 ### Docker settings
 There is one `docker-compose.yml` for a laptop and a server; what differs goes in a
@@ -273,9 +273,13 @@ bench run rq2 --step code --design-from reference -m inlumen -m direct \
 ## What is recorded
 Every run's `episode.json` holds the condition and every measure, and
 `bench export` (or "Download runs (CSV)" in the dashboard) writes them as one row per
-run. Failed runs are kept and counted everywhere, including costs. Each column's group,
-unit and definition are written next to the export (`<name>.columns.csv`, also
-"Column descriptions (CSV)" in the dashboard), from `src/inlumen_bench/columns.py`.
+run. Failed runs are kept and counted everywhere, including costs. What every column
+means is written next to the export (`<name>.columns.csv`, also "Column descriptions
+(CSV)" in the dashboard), from `src/inlumen_bench/columns.py`: first each column of the
+dashboard's tables under the name the table shows (with the runs-CSV columns it comes
+from), then each runs-CSV column (with the table names it is shown under). The same
+descriptions are the tooltips of the table headers and the "What these columns mean"
+panel under each table.
 The evaluation protocol (design, conditions and every metric's definition) is in
 [docs/protocol.md](docs/protocol.md).
 

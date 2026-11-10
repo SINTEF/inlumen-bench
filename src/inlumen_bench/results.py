@@ -157,9 +157,12 @@ def summarize(root: Path, group_by: tuple[str, ...] = DEFAULT_GROUPS) -> list[di
         cell["recovered_by_repair"] = _rate([r["implementation"].get("recovered_by_repair")
                                              for r in initially_failing])
         cell["mean_attempts"] = _mean([r["implementation"].get("attempts") for r in traced])
-        executed = [r for r in decided if r.get("execution")]
-        cell["dagster_loaded"] = _rate([r["execution"].get("loaded") for r in executed])
-        cell["dagster_completed"] = _rate([r["execution"].get("completed") for r in executed])
+        # Over finished runs like every other rate: a run that never reached ServiceCraft did not load.
+        executed = any(r.get("execution") for r in decided)
+        cell["dagster_loaded"] = (_rate([bool((r.get("execution") or {}).get("loaded")) for r in decided])
+                                  if executed else None)
+        cell["dagster_completed"] = (_rate([bool((r.get("execution") or {}).get("completed")) for r in decided])
+                                     if executed else None)
 
         # RQ3: cost and time, failed runs included.
         costs = [(r.get("usage") or {}).get("cost_usd") or 0 for r in members]
