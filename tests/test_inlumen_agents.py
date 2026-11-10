@@ -89,6 +89,25 @@ def test_canvas_graph_declares_each_artifact_with_its_file_name():
         ("src_rates_csv", "data", "join", "rates")}
 
 
+def test_required_columns_of_the_provided_graph_reach_the_contracts():
+    """The reference graph's artifact contracts (required columns) are declared to inLUMEN,
+    as the direct baseline reads them in the same graph."""
+    from inlumen_bench.design import from_task_graph
+
+    graph = {"title": "t", "inputs": [{"id": "input:a.csv", "path": "inputs/a.csv", "format": "csv"}],
+             "tasks": [{"id": "clean", "inputs": ["input:a.csv"], "outputs": ["clean.csv", "report.json"]}],
+             "artifacts": [{"id": "clean.csv", "path": "clean.csv", "format": "csv", "required_columns": ["id", "x"]},
+                           {"id": "report.json", "path": "report.json", "format": "json", "required_columns": []}]}
+    design = from_task_graph(graph)
+    assert design["artifact_columns"] == {"clean.csv": ["id", "x"]}
+    declared = canvas_graph(design, {"clean": "clean"})["nodes"]
+    outs = next(n for n in declared if n["id"] == "clean")["data"]["implementation"]["output_artifacts"]
+    assert {a["filename"]: a.get("required_columns") for a in outs} == {"clean.csv": ["id", "x"], "report.json": None}
+    # Without contracts (the ablation) nothing is declared.
+    assert "implementation" not in next(n for n in canvas_graph(design, {"clean": "clean"}, contracts=False)["nodes"]
+                                        if n["id"] == "clean")["data"]
+
+
 def test_code_step_runs_inlumen_codegen_and_the_packages_run(tmp_path, monkeypatch):
     llm = FakeLLM()
     ctx = _ctx(tmp_path, llm, design=DESIGN)

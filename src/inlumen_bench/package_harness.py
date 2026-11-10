@@ -142,11 +142,14 @@ def source_ids(design: dict, reserved: set[str]) -> dict[str, str]:
     return out
 
 
-def output_artifact(filename: str, port: str) -> dict:
+def output_artifact(filename: str, port: str, required_columns: list[str] | None = None) -> dict:
+    """One declared output artifact; inLUMEN checks its required columns when the code runs."""
     from inlumen.contracts.artifact_contract import classify_artifact
 
-    return {"name": PurePosixPath(filename).stem, "filename": filename, "port": port,
-            **classify_artifact(filename)}
+    out = {"name": PurePosixPath(filename).stem, "filename": filename, "port": port, **classify_artifact(filename)}
+    if required_columns:
+        out["required_columns"] = list(required_columns)
+    return out
 
 
 def canvas_graph(design: dict, names: dict[str, str], title: str = "", *, contracts: bool = True) -> dict:
@@ -194,8 +197,10 @@ def canvas_graph(design: dict, names: dict[str, str], title: str = "", *, contra
             },
         }
         if contracts:
+            columns = design.get("artifact_columns") or {}
             data["implementation"] = {"output_artifacts": [
-                output_artifact(artifact, pid) for pid, artifact in zip(out_ids, task["outputs"])]}
+                output_artifact(artifact, pid, columns.get(artifact))
+                for pid, artifact in zip(out_ids, task["outputs"])]}
         nodes.append({"id": step, "data": data})
         for pid, item in zip(in_ids, task["inputs"]):
             if item not in out_port or made_by.get(item) == task["id"]:

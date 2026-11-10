@@ -54,7 +54,7 @@ scripts/bench-docker datasets fetch
 scripts/bench-docker setup
 scripts/bench-docker run pilot -c 016 --model openrouter:<model-id> -m inlumen -m direct -n 3
 ```
-After changing the code, rebuild with `docker compose build` (or `docker build -t inlumen-bench:0.3.5 .`).
+After changing the code, rebuild with `docker compose build` (or `docker build -t inlumen-bench:0.3.6 .`).
 
 ### Docker settings
 There is one `docker-compose.yml` for a laptop and a server; what differs goes in a

@@ -116,8 +116,12 @@ def check(design: dict, mandatory: list[str], input_files: list[str]) -> list[st
 
 
 def from_task_graph(graph: dict) -> dict:
-    """ServiceCraft's (provided) task graph → design; drops evaluator-only fields."""
-    return {
+    """ServiceCraft's (provided) task graph → design; drops evaluator-only fields.
+
+    Keeps each artifact's required columns: they are part of the artifact contract
+    the provided graph gives every method (the direct baseline reads them in the graph).
+    """
+    design = {
         "title": graph.get("title", ""),
         "inputs": [{"id": i["id"], "path": i["path"]} for i in graph["inputs"]],
         "tasks": [
@@ -127,6 +131,10 @@ def from_task_graph(graph: dict) -> dict:
             for t in graph["tasks"]
         ],
     }
+    columns = {a["id"]: list(a.get("required_columns") or []) for a in graph.get("artifacts") or [] if a.get("id")}
+    if any(columns.values()):
+        design["artifact_columns"] = {k: v for k, v in columns.items() if v}
+    return design
 
 
 def parse_design(text: str) -> dict:
