@@ -163,9 +163,9 @@ def _design_model():
                                                   arguments=json.dumps({"params": json.dumps(arguments)}))])
 
     return ReplayChatCompletionClient([
-        call("create_step", type="source", label="Orders", description="Order table"),
-        call("create_step", type="task", label="Clean orders", description="Drop empty rows"),
-        call("create_step", type="destination", label="Clean table", description="CSV"),
+        call("create_steps", type="source", label="Orders", description="Order table"),
+        call("create_steps", type="task", label="Clean orders", description="Drop empty rows"),
+        call("create_steps", type="destination", label="Clean table", description="CSV"),
         CreateResult(finish_reason="stop", content="Done.", cached=False,
                      usage=RequestUsage(prompt_tokens=120, completion_tokens=20)),
     ], model_info={"vision": False, "function_calling": True, "json_output": True, "family": "unknown",
@@ -327,10 +327,10 @@ def test_the_design_agent_operations_are_traced(tmp_path, monkeypatch):
 
     assert result.status == "designed", result.error
     trace = json.loads((ctx.work_dir / "composition-trace.json").read_text())
-    assert [t["tool"] for t in trace] == ["create_step"] * 3
+    assert [t["tool"] for t in trace] == ["create_steps"] * 3
     assert all("result" in t and t["is_error"] is False for t in trace)
     summary = result.details["composition_trace"]
-    assert summary["operations"] == 3 and summary["by_tool"] == {"create_step": 3} and summary["accepted"]
+    assert summary["operations"] == 3 and summary["by_tool"] == {"create_steps": 3} and summary["accepted"]
     assert result.details["conditions"]["grounded"] is True
 
 
