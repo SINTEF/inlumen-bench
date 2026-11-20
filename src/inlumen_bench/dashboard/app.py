@@ -359,7 +359,7 @@ def composition_results(root: Path) -> None:
         "dependencies found": as_percent(df["design_dependency_recall"]),
         "bindings found": as_percent(df["design_binding_recall"]),
         "fully correct": as_percent(df["design_design_correct"]),
-        "operations / run": num(df["mean_operations"]),
+        "tool calls / run": num(df["mean_tool_calls"]),
     })
     show_table("Composition (RQ1)", table, percent=(
         "valid composition", "outputs covered", "components found", "one-to-one", "dependencies found",
@@ -368,7 +368,7 @@ def composition_results(root: Path) -> None:
                "known inputs, no cycles). Comparison with the reference composition matches components by the "
                "outputs they write (provisional): components, dependencies and bindings (which input each "
                "component reads) found, and fully correct compositions. Averages are over valid compositions. "
-               "Operations are the design agent's graph operations (tool calls).")
+               "Tool calls are those of the design agent.")
     review_sample(root)
 
 
@@ -534,7 +534,7 @@ def runs_tab(root: Path, exp: Experiment, rows: list[dict], running: bool) -> No
         "condition": r["condition"], "replicate": r["repetition"],
         **({"components found": pct((r.get("design_score") or {}).get("task_recall")),
             "dependencies found": pct((r.get("design_score") or {}).get("dependency_recall")),
-            "operations": (r.get("composition_trace") or {}).get("operations")} if is_design else
+            "tool calls": results.tool_calls(r.get("composition_trace"))[0]} if is_design else
            {"attempts": (r.get("implementation") or {}).get("attempts"),
             **{label: _score(r, key) for key, label in (("dagster_executable", "executable"),
                                                         ("output_contract_valid", "outputs valid"),
@@ -692,12 +692,13 @@ def run_composition(root: Path, ep_dir: Path, state: dict, exp: Experiment) -> N
     trace_file = ep_dir / "work" / "composition-trace.json"
     trace = state.get("composition_trace") or {}
     if trace_file.is_file():
-        operations = json.loads(trace_file.read_text())
-        with st.expander(f"Operation trace · {len(operations)} operations"
-                         + (f", {trace.get('failed_operations')} failed" if trace.get("failed_operations") else "")
+        calls = json.loads(trace_file.read_text())
+        failed_calls = results.tool_calls(trace)[1]
+        with st.expander(f"Tool call trace · {len(calls)} tool calls"
+                         + (f", {failed_calls} failed" if failed_calls else "")
                          + (" · repaired after validation" if trace.get("repaired") else "")):
-            if operations:
-                st.dataframe(pd.DataFrame(operations), hide_index=True, width="stretch")
+            if calls:
+                st.dataframe(pd.DataFrame(calls), hide_index=True, width="stretch")
             if trace.get("validation_errors"):
                 st.markdown("Validation errors: " + "; ".join(trace["validation_errors"]))
     if exp.stage == "design" and state.get("status") == "designed":
@@ -977,7 +978,7 @@ def launch_page() -> None:
         max_cost = l1.number_input("Max cost (USD)", 0.0, value=2.0 if phase == "code" else 0.5, step=0.5)
         max_seconds = l2.number_input("Max time (s)", 60, value=1800 if phase == "code" else 900, step=60)
         max_requests = l3.number_input("Max model requests", 1, value=60 if phase == "code" else 40)
-        tool_iterations = l4.number_input("Max agent operations per turn", 5, 100, 30, disabled=phase != "design",
+        tool_iterations = l4.number_input("Max tool calls per turn", 5, 100, 30, disabled=phase != "design",
                                           help="Composition: tool calls the design agent may make in one turn.")
         evaluate = phase == "code" and st.checkbox("Execute with ServiceCraft when implementation ends", value=True)
 

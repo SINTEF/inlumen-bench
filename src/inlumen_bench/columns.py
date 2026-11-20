@@ -92,8 +92,8 @@ _add("RQ1 composition", [
     ("extra_dependencies", "count", "Dependencies between mapped components that the reference lacks."),
     ("missing_bindings", "count", "Reference bindings not found."),
     ("extra_bindings", "count", "Bindings on mapped components that the reference lacks."),
-    ("composition_operations", "count", "Tool calls of inLUMEN's design agent."),
-    ("failed_operations", "count", "Tool calls rejected by inLUMEN's checks."),
+    ("composition_tool_calls", "count", "Tool calls of inLUMEN's design agent."),
+    ("failed_tool_calls", "count", "Tool calls rejected by inLUMEN's checks."),
     ("composition_repaired", "bool", "The design agent's validation repair round ran."),
 ])
 _add("RQ2 validation and repair inside the method", [
@@ -245,7 +245,7 @@ TABLES: dict[str, list[tuple[str, str, str, str]]] = {
          "reference component matches one-to-one, same number of components, every reference dependency found "
          "and no extra dependency. Bindings are not part of it. Multiply by 'valid composition' for the share of "
          "finished runs."),
-        ("operations / run", "composition_operations", "count", "Mean graph operations (tool calls) of the design "
+        ("tool calls / run", "composition_tool_calls", "count", "Mean tool calls of the design "
          "agent per run. Ungrounded: 1 (one request)."),
     ],
     "Implementation (RQ2)": [
@@ -325,7 +325,7 @@ TABLES: dict[str, list[tuple[str, str, str, str]]] = {
         ("replicate", "replicate", "index", "Replicate number, from 0."),
         ("components found", "task_recall", "%", "This run's share of reference components found."),
         ("dependencies found", "dependency_recall", "%", "This run's share of reference dependencies found."),
-        ("operations", "composition_operations", "count", "This run's graph operations (tool calls)."),
+        ("tool calls", "composition_tool_calls", "count", "This run's design agent tool calls."),
         ("attempts", "attempts", "count", "This run's attempts: first generation plus repairs."),
         ("executable", "dagster_executable", "yes/no", "As 'executable', for this run."),
         ("outputs valid", "output_contract_valid", "yes/no", "As 'outputs valid', for this run."),

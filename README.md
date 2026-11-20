@@ -54,7 +54,7 @@ scripts/bench-docker datasets fetch
 scripts/bench-docker setup
 scripts/bench-docker run pilot -c 016 --model openrouter:<model-id> -m inlumen -m direct -n 3
 ```
-After changing the code, rebuild with `docker compose build` (or `docker build -t inlumen-bench:0.3.7 .`).
+After changing the code, rebuild with `docker compose build` (or `docker build -t inlumen-bench:0.3.8 .`).
 
 ### Docker settings
 There is one `docker-compose.yml` for a laptop and a server; what differs goes in a
@@ -299,7 +299,7 @@ high ≥ 7).
   outputs they write): outputs covered, components found and one-to-one, split and
   merged components, dependencies and bindings found, and the lists of missing and
   extra components, dependencies and bindings;
-- the composition operation trace (`work/composition-trace.json`): every tool call of
+- the composition tool call trace (`work/composition-trace.json`): every tool call of
   the design agent with its arguments and result, and whether the validation repair
   round ran;
 - manual review: the dashboard draws a seeded random sample of compositions and
