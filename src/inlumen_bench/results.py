@@ -88,6 +88,16 @@ def _rate(values: list) -> float | None:
     return round(sum(bool(v) for v in values) / len(values), 4) if values else None
 
 
+def tool_calls(trace: dict | None) -> tuple[int | None, int | None]:
+    """The design agent's tool calls in a run, and how many were rejected.
+
+    Runs made before bench 0.3.8 stored them as "operations" and "failed_operations".
+    """
+    trace = trace or {}
+    return (trace.get("tool_calls", trace.get("operations")),
+            trace.get("failed_tool_calls", trace.get("failed_operations")))
+
+
 def _mean(values: list) -> float | None:
     values = [v for v in values if v is not None]
     return round(statistics.mean(values), 4) if values else None
@@ -187,7 +197,7 @@ def summarize(root: Path, group_by: tuple[str, ...] = DEFAULT_GROUPS) -> list[di
         for k in DESIGN_KEYS:
             values = [d[k] for d in designs if d.get(k) is not None]
             cell[f"design_{k}"] = round(statistics.mean(values), 4) if values else None
-        cell["mean_operations"] = _mean([(r.get("composition_trace") or {}).get("operations") for r in members])
+        cell["mean_tool_calls"] = _mean([tool_calls(r.get("composition_trace"))[0] for r in members])
         out.append(cell)
     return out
 
@@ -243,8 +253,8 @@ def run_row(experiment: str, row: dict) -> dict:
         "extra_dependencies": score.get("dependency_extra"),
         "missing_bindings": len(score.get("missing_bindings") or []) if score else None,
         "extra_bindings": len(score.get("extra_bindings") or []) if score else None,
-        "composition_operations": trace.get("operations"),
-        "failed_operations": trace.get("failed_operations"),
+        "composition_tool_calls": tool_calls(trace)[0],
+        "failed_tool_calls": tool_calls(trace)[1],
         "composition_repaired": trace.get("repaired"),
         # RQ2: implementation
         "attempts": impl.get("attempts"), "repairs": impl.get("repairs"),

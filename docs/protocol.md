@@ -174,7 +174,7 @@ the dashboard.
 | `binding_recall` (required parameters) | reference (component ← input file) bindings found on the mapped component / reference bindings | ✅ |
 | `missing_bindings`, `extra_bindings` | counts | ✅ |
 | `design_correct` (complete design correctness) | 1 if every component maps one-to-one, no extra components, every reference dependency is found and there are no extra dependencies | ✅ |
-| Composition operations | tool calls of the design agent, failed ones, whether the repair round ran | ✅ |
+| Composition tool calls | tool calls of the design agent, failed ones, whether the repair round ran | ✅ |
 
 Note: bindings currently cover input files only, not parameter values; parameter
 values are recorded in the composition but not scored.
@@ -235,7 +235,7 @@ estimated monetary cost.
 | Code-producing requests | implementation + repair requests | ✅ (per phase) |
 | `node_generations` | components whose package was generated | ✅ |
 | Repairs | repair attempts | ✅ |
-| Tool calls | design agent tool calls | ✅ (`composition_operations`) |
+| Tool calls | design agent tool calls | ✅ (`composition_tool_calls`) |
 | Validation executions | inLUMEN runs the pipeline on sample inputs after every attempt, so this equals `attempts` | ✅ |
 
 ### 5.8 Static diagnostics (from ServiceCraft stage 2)

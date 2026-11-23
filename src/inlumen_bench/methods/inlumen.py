@@ -236,7 +236,7 @@ class Inlumen(Method):
         events, budget = ctx.events, ctx.budget
         pending: dict[str, float] = {}
         failure: dict[str, BaseException] = {}
-        trace: list[dict] = []  # the composition operation trace: one entry per tool call
+        trace: list[dict] = []  # the composition trace: one entry per tool call
         by_call: dict[str, dict] = {}
 
         def note_results(messages) -> None:
@@ -254,7 +254,7 @@ class Inlumen(Method):
             if isinstance(getattr(result, "content", None), list):
                 for call in result.content:
                     if getattr(call, "name", None):
-                        entry = {"operation": len(trace) + 1, "tool": call.name,
+                        entry = {"call": len(trace) + 1, "tool": call.name,
                                  "arguments": str(call.arguments)[:4000],
                                  "request": counters["design_requests"] + 1}
                         trace.append(entry)
@@ -262,7 +262,7 @@ class Inlumen(Method):
 
         class Budgeted(RecordingModelClient):
             """Checks the budget, announces each request before it is sent and
-            records the tool calls (graph operations) the agent makes.
+            records the tool calls the agent makes.
 
             autogen re-raises an agent's errors as a plain RuntimeError, so the
             original one (budget, provider) is kept for the runner to classify.
@@ -321,7 +321,7 @@ class Inlumen(Method):
             by_tool: dict[str, int] = {}
             for entry in trace:
                 by_tool[entry["tool"]] = by_tool.get(entry["tool"], 0) + 1
-            return {"operations": len(trace), "failed_operations": sum(1 for t in trace if t.get("is_error")),
+            return {"tool_calls": len(trace), "failed_tool_calls": sum(1 for t in trace if t.get("is_error")),
                     "by_tool": by_tool}
 
         details = ctx.details
@@ -385,12 +385,12 @@ class Inlumen(Method):
         counters["model_requests"] += 1
         counters["design_requests"] += 1
         (ctx.work_dir / "composition-response.md").write_text(reply.text)
-        details["composition_trace"] = {"operations": 1, "failed_operations": 0, "by_tool": {"single_request": 1},
+        details["composition_trace"] = {"tool_calls": 1, "failed_tool_calls": 0, "by_tool": {"single_request": 1},
                                         "accepted": True, "repaired": False, "validation_errors": []}
         try:
             graph = _ungrounded_graph(_parse_json(reply.text), ctx.case_id)
         except (ValueError, KeyError, TypeError) as exc:
-            details["composition_trace"].update(accepted=False, failed_operations=1)
+            details["composition_trace"].update(accepted=False, failed_tool_calls=1)
             return MethodResult("generation_failed", error=f"the composition is not a valid graph: {exc}",
                                 counters=counters, details=details)
         (ctx.work_dir / "inlumen-graph.json").write_text(json.dumps(graph, indent=2))

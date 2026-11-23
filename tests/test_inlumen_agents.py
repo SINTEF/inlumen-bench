@@ -317,7 +317,7 @@ def test_without_contracts_no_output_artifacts_are_declared(tmp_path, monkeypatc
     assert result.details["implementation"]["attempts"] >= 1
 
 
-def test_the_design_agent_operations_are_traced(tmp_path, monkeypatch):
+def test_the_design_agent_tool_calls_are_traced(tmp_path, monkeypatch):
     prompt = "Clean the orders.\n\n5. Mandatory output artifacts\n- `clean.csv`\n"
     llm = FakeLLM(naming=[{"sources": {"1": ["orders.csv", "rates.csv"]}, "tasks": {"2": ["clean.csv"]}}])
     ctx = _ctx(tmp_path, llm)
@@ -330,7 +330,7 @@ def test_the_design_agent_operations_are_traced(tmp_path, monkeypatch):
     assert [t["tool"] for t in trace] == ["create_steps"] * 3
     assert all("result" in t and t["is_error"] is False for t in trace)
     summary = result.details["composition_trace"]
-    assert summary["operations"] == 3 and summary["by_tool"] == {"create_steps": 3} and summary["accepted"]
+    assert summary["tool_calls"] == 3 and summary["by_tool"] == {"create_steps": 3} and summary["accepted"]
     assert result.details["conditions"]["grounded"] is True
 
 
